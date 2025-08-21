@@ -68,7 +68,22 @@ export class OrderHistoryService {
         for (const hash of indexData) {
           const order = await this.redis.hgetall(`order:${hash}`);
           if (order) {
-            orders.set(hash, order as unknown as OrderStatus);
+            // Parse numeric fields from Redis strings
+            const parsedOrder: OrderStatus = {
+              ...order,
+              price: typeof order.price === 'string' ? parseFloat(order.price) : order.price,
+              purchasedAt: typeof order.purchasedAt === 'string' ? parseInt(order.purchasedAt) : order.purchasedAt,
+              lastUpdated: typeof order.lastUpdated === 'string' ? parseInt(order.lastUpdated) : order.lastUpdated,
+              purchasedBlock: order.purchasedBlock ? (typeof order.purchasedBlock === 'string' ? parseInt(order.purchasedBlock) : order.purchasedBlock) : undefined,
+              confirmedBlock: order.confirmedBlock ? (typeof order.confirmedBlock === 'string' ? parseInt(order.confirmedBlock) : order.confirmedBlock) : undefined,
+              broadcastAt: order.broadcastAt ? (typeof order.broadcastAt === 'string' ? parseInt(order.broadcastAt) : order.broadcastAt) : undefined,
+              deliveredAt: order.deliveredAt ? (typeof order.deliveredAt === 'string' ? parseInt(order.deliveredAt) : order.deliveredAt) : undefined,
+              confirmedAt: order.confirmedAt ? (typeof order.confirmedAt === 'string' ? parseInt(order.confirmedAt) : order.confirmedAt) : undefined,
+              confirmations: order.confirmations ? (typeof order.confirmations === 'string' ? parseInt(order.confirmations) : order.confirmations) : undefined,
+              retryCount: order.retryCount ? (typeof order.retryCount === 'string' ? parseInt(order.retryCount) : order.retryCount) : undefined,
+            } as OrderStatus;
+            
+            orders.set(hash, parsedOrder);
           }
         }
         
