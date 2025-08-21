@@ -5,7 +5,8 @@ export interface FulfillmentState {
   lastBlock: number;
   lastOrderHash: string | null;
   lastChecked: number;
-  processedOrders: Set<string>;
+  processedOrders: Set<string>;  // Only confirmed transfers
+  lastCleanup: number;  // Last block we cleaned up old orders
 }
 
 export class StateManager {
@@ -24,6 +25,7 @@ export class StateManager {
         return {
           ...data,
           processedOrders: new Set(data.processedOrders || []),
+          lastCleanup: data.lastCleanup || 0,
         };
       } catch (error) {
         console.error('Error loading state:', error);
@@ -36,6 +38,7 @@ export class StateManager {
       lastOrderHash: null,
       lastChecked: 0,
       processedOrders: new Set(),
+      lastCleanup: 0,
     };
   }
 
@@ -95,7 +98,38 @@ export class StateManager {
       lastOrderHash: null,
       lastChecked: 0,
       processedOrders: new Set(),
+      lastCleanup: 0,
     };
     this.saveState();
+  }
+
+  getLastCleanup(): number {
+    return this.state.lastCleanup || 0;
+  }
+
+  setLastCleanup(block: number): void {
+    this.state.lastCleanup = block;
+    this.saveState();
+  }
+
+  /**
+   * Remove old orders from processedOrders set
+   * Returns the number of orders removed
+   */
+  cleanupOldOrders(orderHashes: Set<string>, beforeBlock: number): number {
+    const initialSize = this.state.processedOrders.size;
+    
+    // Only keep orders that are NOT in the old orders set
+    const newProcessedOrders = new Set<string>();
+    for (const hash of this.state.processedOrders) {
+      if (!orderHashes.has(hash)) {
+        newProcessedOrders.add(hash);
+      }
+    }
+    
+    this.state.processedOrders = newProcessedOrders;
+    this.saveState();
+    
+    return initialSize - newProcessedOrders.size;
   }
 }

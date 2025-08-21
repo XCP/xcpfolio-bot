@@ -1,4 +1,17 @@
-import 'dotenv/config';
+import * as dotenv from 'dotenv';
+import * as fs from 'fs';
+import * as path from 'path';
+
+// Load .env first
+dotenv.config();
+
+// Then load .env.local if it exists (overrides .env)
+const localEnvPath = path.join(process.cwd(), '.env.local');
+if (fs.existsSync(localEnvPath)) {
+  console.log('Loading .env.local (overriding .env)');
+  dotenv.config({ path: localEnvPath, override: true });
+}
+
 import * as cron from 'node-cron';
 import { FulfillmentProcessor } from './services/fulfillment';
 import { OrderHistoryService } from './services/order-history';

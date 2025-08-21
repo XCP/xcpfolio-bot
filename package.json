@@ -19,6 +19,7 @@
     "@noble/hashes": "^1.8.0",
     "@scure/base": "^1.2.6",
     "@scure/btc-signer": "^1.8.1",
+    "@upstash/redis": "^1.35.3",
     "axios": "^1.11.0",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",

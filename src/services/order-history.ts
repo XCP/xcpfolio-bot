@@ -1,9 +1,23 @@
 /**
  * Order history tracking for status page
+ * Uses Vercel KV when available, falls back to JSON for local dev
  */
 
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
+import { Redis } from '@upstash/redis';
+
+// Initialize Redis if credentials available
+let redis: Redis | null = null;
+if (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) {
+  redis = new Redis({
+    url: process.env.KV_REST_API_URL,
+    token: process.env.KV_REST_API_TOKEN,
+  });
+  console.log('OrderHistory: Using Vercel KV for persistence');
+} else {
+  console.log('OrderHistory: Using local JSON file');
+}
 
 export interface OrderStatus {
   orderHash: string;
@@ -48,7 +62,7 @@ export class OrderHistoryService {
     return new Map();
   }
 
-  private saveHistory(): void {
+  private async saveHistory(): Promise<void> {
     try {
       const ordersArray = Array.from(this.orders.entries());
       // Keep only the most recent orders
@@ -56,13 +70,29 @@ export class OrderHistoryService {
         .sort((a, b) => b[1].lastUpdated - a[1].lastUpdated)
         .slice(0, this.maxOrders);
       
-      const data = {
-        version: 1,
-        lastUpdated: Date.now(),
-        orders: recentOrders
-      };
-      
-      writeFileSync(this.historyPath, JSON.stringify(data, null, 2));
+      // Save to Vercel KV if available
+      if (redis) {
+        // Save each order individually
+        for (const [hash, order] of recentOrders) {
+          await redis.hset(`order:${hash}`, order as any);
+          await redis.expire(`order:${hash}`, 60 * 60 * 24 * 7); // 7 day TTL
+        }
+        
+        // Update index
+        const orderHashes = recentOrders.map(([hash]) => hash);
+        await redis.set('order-index', JSON.stringify(orderHashes), {
+          ex: 60 * 60 * 24 * 7
+        });
+      } else {
+        // Fall back to JSON file
+        const data = {
+          version: 1,
+          lastUpdated: Date.now(),
+          orders: recentOrders
+        };
+        
+        writeFileSync(this.historyPath, JSON.stringify(data, null, 2));
+      }
     } catch (error) {
       console.error('Error saving order history:', error);
     }

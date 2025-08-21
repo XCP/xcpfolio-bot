@@ -2,6 +2,7 @@ import { CounterpartyService, AssetInfo } from './counterparty';
 import { BitcoinService, SignedTransaction } from './bitcoin';
 import { StateManager } from './state';
 import { OrderHistoryService, OrderStatus } from './order-history';
+import { NotificationService } from './notifications';
 import { Order } from '../types';
 import { RETRY_STRATEGY, TX_LIMITS, TIME, ASSET_CONFIG } from '../constants';
 
@@ -137,12 +138,13 @@ export class FulfillmentProcessor {
    * broadcasts and race conditions.
    * 
    * Processing steps:
-   * 1. Update mempool state (check for confirmations/drops)
-   * 2. Handle stuck transactions with RBF
-   * 3. Check mempool capacity (25 tx limit)
-   * 4. Fetch and validate new filled orders
-   * 5. Process each order sequentially
-   * 6. Update state for next run
+   * 1. Recover active transactions from mempool on startup
+   * 2. Update mempool state (check for confirmations/drops)
+   * 3. Handle stuck transactions with RBF
+   * 4. Check mempool capacity (25 tx limit)
+   * 5. Fetch and validate new filled orders
+   * 6. Process each order sequentially
+   * 7. Update state for next run
    * 
    * @returns Array of ProcessResult objects for each processed order
    * @throws Will throw if fatal processing error occurs
@@ -184,23 +186,25 @@ export class FulfillmentProcessor {
     const results: ProcessResult[] = [];
 
     try {
-      // 1. Update mempool state
-      await this.updateMempoolState();
+      // 1. Check Bitcoin mempool capacity FIRST
+      const actualMempoolCount = await this.bitcoin.getUnconfirmedTxCount(this.config.xcpfolioAddress);
+      console.log(`Bitcoin mempool count: ${actualMempoolCount}/${this.config.maxMempoolTxs}`);
       
-      // 2. Handle stuck transactions with RBF if enabled
-      if (this.config.rbfEnabled) {
-        const rbfResults = await this.handleStuckTransactions();
-        results.push(...rbfResults);
-      }
-
-      // 3. Check mempool capacity
-      const activeTxCount = this.processingState.orderTransactions.size;
-      console.log(`Active transactions: ${activeTxCount}/${this.config.maxMempoolTxs}`);
-      
-      if (activeTxCount >= this.config.maxMempoolTxs!) {
-        console.log('Mempool at capacity, waiting for confirmations');
+      if (actualMempoolCount >= this.config.maxMempoolTxs!) {
+        console.log(`Mempool at capacity, waiting for confirmations`);
+        await NotificationService.warning('Mempool at capacity', {
+          current: actualMempoolCount,
+          limit: this.config.maxMempoolTxs
+        });
         return results;
       }
+
+      // 2. Get all pending transfers from Counterparty mempool
+      const pendingTransfers = await this.getPendingTransfers();
+      console.log(`Found ${pendingTransfers.size} pending transfers in mempool`);
+      
+      // 3. Clean up old completed orders periodically (keep state small)
+      await this.cleanupOldCompletedOrders();
 
       // 4. Get current block height
       const currentBlock = await this.bitcoin.getCurrentBlockHeight();
@@ -212,36 +216,56 @@ export class FulfillmentProcessor {
       console.log('Fetching filled orders...');
       const orders = await this.counterparty.getFilledXCPFOLIOOrders(this.config.xcpfolioAddress);
       
-      if (orders.length === 0) {
-        console.log('No filled orders found');
+      // Filter to only recent orders (optimization)
+      const lastProcessedBlock = this.state.getLastBlock();
+      const newOrders = orders.filter(o => !lastProcessedBlock || o.block_index > lastProcessedBlock);
+      
+      if (newOrders.length === 0) {
+        console.log('No new filled orders found');
         this.state.setLastBlock(currentBlock);
         return results;
       }
 
-      console.log(`Found ${orders.length} total filled orders`);
+      console.log(`Found ${newOrders.length} new filled orders (${orders.length} total)`);
+      
+      // Notify about new confirmed orders
+      for (const order of newOrders) {
+        const assetName = (order.give_asset_info?.asset_longname || order.give_asset).replace('XCPFOLIO.', '');
+        await NotificationService.success('✅ Order filled & confirmed!', {
+          asset: assetName,
+          orderHash: order.tx_hash.slice(0, 8) + '...',
+          block: order.block_index
+        });
+      }
 
-      // 6. Process orders sequentially
-      for (const order of orders) {
+      // 6. Process new orders sequentially
+      for (const order of newOrders) {
         // Check if we should stop
         if (this.shouldStop) {
           console.log('Stop requested, halting processing');
           break;
         }
 
-        // Check mempool capacity
-        if (this.processingState.orderTransactions.size >= this.config.maxMempoolTxs!) {
-          console.log('Mempool filled during processing, stopping');
+        // Re-check ACTUAL mempool capacity before each order
+        const currentMempoolCount = await this.bitcoin.getUnconfirmedTxCount(this.config.xcpfolioAddress);
+        if (currentMempoolCount >= this.config.maxMempoolTxs!) {
+          console.log(`Mempool at capacity (${currentMempoolCount}/${this.config.maxMempoolTxs}), stopping order processing`);
           break;
         }
 
-        // Skip if already processed
+        // Skip if already completed (confirmed transfer)
         if (this.state.isOrderProcessed(order.tx_hash)) {
+          console.log(`Order ${order.tx_hash} already completed`);
           continue;
         }
 
-        // Skip if has active transaction
-        if (this.processingState.orderTransactions.has(order.tx_hash)) {
-          console.log(`Order ${order.tx_hash} has active transaction, skipping`);
+        // Get asset name for checking
+        const assetName = (order.give_asset_info?.asset_longname || order.give_asset).replace('XCPFOLIO.', '');
+        
+        // Skip if transfer is pending in mempool
+        const pendingKey = `${assetName}:${order.source}`;
+        if (pendingTransfers.has(pendingKey)) {
+          console.log(`Order ${order.tx_hash} has pending transfer in mempool`);
           continue;
         }
 
@@ -251,6 +275,14 @@ export class FulfillmentProcessor {
         try {
           console.log(`\n${'='.repeat(60)}`);
           console.log(`Processing order ${order.tx_hash}`);
+          
+          const assetName = (order.give_asset_info?.asset_longname || order.give_asset).replace('XCPFOLIO.', '');
+          
+          // Notify we're starting to process
+          await NotificationService.info('⚙️ Processing order', {
+            asset: assetName,
+            orderHash: order.tx_hash.slice(0, 8) + '...'
+          });
           
           const result = await this.processOrderSafely(order, currentBlock);
           results.push(result);
@@ -398,7 +430,23 @@ export class FulfillmentProcessor {
       }
 
       // Stage 2: Check if already transferred (CRITICAL!)
-      console.log('Stage 2: Checking if already transferred...');
+      console.log('Stage 2: Checking if already transferred (confirmed or pending)...');
+      
+      // First check if we have an active transaction in memory
+      const existingTx = this.processingState.orderTransactions.get(order.tx_hash);
+      if (existingTx) {
+        console.log(`Active tx exists in memory: ${existingTx.txid}`);
+        return {
+          orderHash: order.tx_hash,
+          asset: assetName,
+          buyer: buyerAddress,
+          success: true,
+          txid: existingTx.txid,
+          stage: 'broadcast'
+        };
+      }
+      
+      // Check both confirmed AND unconfirmed transfers
       const alreadyTransferred = await this.counterparty.isAssetTransferredTo(
         assetName,
         buyerAddress,
@@ -422,20 +470,6 @@ export class FulfillmentProcessor {
           buyer: buyerAddress,
           success: true,
           stage: 'confirmed'
-        };
-      }
-
-      // Check if we have an active transaction
-      const existingTx = this.processingState.orderTransactions.get(order.tx_hash);
-      if (existingTx) {
-        console.log(`Active tx exists: ${existingTx.txid}`);
-        return {
-          orderHash: order.tx_hash,
-          asset: assetName,
-          buyer: buyerAddress,
-          success: true,
-          txid: existingTx.txid,
-          stage: 'broadcast'
         };
       }
 
@@ -568,17 +602,11 @@ export class FulfillmentProcessor {
         
         console.log(`Using fee rate: ${feeRate} sat/vB (max total: ${feeRate * TX_LIMITS.ESTIMATED_TX_VSIZE} sats)`);
 
-        const utxos = await this.bitcoin.fetchUTXOs(this.config.xcpfolioAddress);
-        if (!utxos || utxos.length === 0) {
-          throw new Error('No UTXOs available');
-        }
-
         rawTx = await this.counterparty.composeTransfer(
           this.config.xcpfolioAddress,
           assetName,
           buyerAddress,
           feeRate,
-          utxos,
           'auto',
           true // validate=true for normal tx
         );
@@ -634,8 +662,32 @@ export class FulfillmentProcessor {
       // Stage 5: Broadcast transaction
       this.orderHistory.updateOrderStatus(order.tx_hash, 'broadcasting', 'broadcast');
       console.log('Stage 5: Broadcasting transaction...');
+      
+      // Final mempool check before broadcast
+      const currentMempoolCount = this.processingState.orderTransactions.size;
+      if (currentMempoolCount >= this.config.maxMempoolTxs!) {
+        console.log(`Mempool at capacity (${currentMempoolCount}/${this.config.maxMempoolTxs}), aborting broadcast`);
+        return {
+          orderHash: order.tx_hash,
+          asset: assetName,
+          buyer: buyerAddress,
+          success: false,
+          error: `Mempool at capacity: ${currentMempoolCount}/${this.config.maxMempoolTxs}`,
+          stage: 'broadcast'
+        };
+      }
+      
       try {
         const txid = await this.bitcoin.broadcastTransaction(signedTx.hex);
+        
+        // Notify successful broadcast
+        await NotificationService.success('🚀 Transfer broadcast!', {
+          asset: assetName,
+          buyer: buyerAddress,
+          txid: txid.slice(0, 8) + '...',
+          'Full TXID': txid,
+          'Track at': `https://mempool.space/tx/${txid}`
+        });
         
         // Update order history with txid
         this.orderHistory.updateOrderStatus(order.tx_hash, 'broadcasting', 'mempool', txid);
@@ -839,13 +891,11 @@ export class FulfillmentProcessor {
       console.log(`RBF: Bumping fee from ${tx.feeRate} to ${newFeeRate} sat/vB (${Math.round((newFeeRate / tx.feeRate - 1) * 100)}% increase)`);
 
       // Compose with validate=false for RBF
-      const utxos = await this.bitcoin.fetchUTXOs(this.config.xcpfolioAddress);
       const rawTx = await this.counterparty.composeTransfer(
         this.config.xcpfolioAddress,
         tx.asset,
         tx.buyer,
         newFeeRate,
-        utxos,
         'auto',
         false // validate=false for RBF!
       );
@@ -985,6 +1035,15 @@ export class FulfillmentProcessor {
             const txData = await this.bitcoin.getTransaction(tx.txid);
             if (txData.status?.confirmed) {
               console.log(`✅ Transaction ${tx.txid} confirmed`);
+              
+              // Notify about confirmation
+              await NotificationService.success('💎 Transfer confirmed on blockchain!', {
+                asset: tx.asset,
+                buyer: tx.buyer,
+                txid: tx.txid.slice(0, 8) + '...',
+                'View on blockchain': `https://mempool.space/tx/${tx.txid}`
+              });
+              
               toRemove.push(orderHash);
               continue;
             }
@@ -1104,10 +1163,131 @@ export class FulfillmentProcessor {
    * Send critical alert for issues requiring attention
    */
   private async sendCriticalAlert(message: string): Promise<void> {
-    console.error(`🚨 CRITICAL ALERT: ${message}`);
+    await NotificationService.critical(message);
+  }
+
+  /**
+   * Get pending transfers from Counterparty mempool
+   * Returns a Set of "asset:buyer" keys for quick lookup
+   */
+  private async getPendingTransfers(): Promise<Set<string>> {
+    const pending = new Set<string>();
     
-    // This will be handled by the notification system in index.ts
-    // but we log it prominently here for visibility
+    try {
+      const mempoolEvents = await this.counterparty.getMempoolTransfers(this.config.xcpfolioAddress);
+      
+      for (const event of mempoolEvents) {
+        if (event.params?.asset && event.params?.transfer_destination) {
+          const key = `${event.params.asset}:${event.params.transfer_destination}`;
+          pending.add(key);
+          console.log(`Pending transfer: ${key}`);
+        }
+      }
+    } catch (error) {
+      console.error('Error getting pending transfers:', error);
+    }
+    
+    return pending;
+  }
+
+  /**
+   * Clean up old completed orders to keep state file small
+   * Remove orders older than 1000 blocks
+   */
+  private async cleanupOldCompletedOrders(): Promise<void> {
+    const currentBlock = await this.bitcoin.getCurrentBlockHeight();
+    const lastCleanup = this.state.getLastCleanup();
+    
+    // Only cleanup once per 100 blocks
+    if (currentBlock - lastCleanup < 100) {
+      return;
+    }
+    
+    try {
+      const orders = await this.counterparty.getFilledXCPFOLIOOrders(this.config.xcpfolioAddress);
+      const oldOrders = new Set<string>();
+      
+      for (const order of orders) {
+        if (order.block_index < currentBlock - 1000) {
+          oldOrders.add(order.tx_hash);
+        }
+      }
+      
+      // Remove old orders from state
+      const cleaned = this.state.cleanupOldOrders(oldOrders, currentBlock - 1000);
+      if (cleaned > 0) {
+        console.log(`Cleaned up ${cleaned} old completed orders`);
+      }
+      
+      this.state.setLastCleanup(currentBlock);
+    } catch (error) {
+      console.error('Error during cleanup:', error);
+    }
+  }
+
+  /**
+   * Recover active transactions from mempool on startup
+   * 
+   * When the bot restarts, it needs to know about transactions
+   * that are still unconfirmed in the mempool to avoid re-broadcasting.
+   * This method checks for pending asset transfers from our address.
+   */
+  private async recoverMempoolTransactions(): Promise<void> {
+    try {
+      console.log('Recovering active transactions from mempool...');
+      
+      // Get all unconfirmed issuances (transfers) from our address
+      const mempoolTransfers = await this.counterparty.getMempoolTransfers(this.config.xcpfolioAddress);
+      
+      if (mempoolTransfers.length > 0) {
+        console.log(`Found ${mempoolTransfers.length} unconfirmed transfers in mempool`);
+        const currentBlock = await this.bitcoin.getCurrentBlockHeight();
+        
+        for (const transfer of mempoolTransfers) {
+          // Extract transfer details from the mempool event
+          const { tx_hash, params } = transfer;
+          if (!params) continue;
+          
+          const asset = params.asset;
+          const destination = params.transfer_destination || params.destination;
+          
+          if (!asset || !destination) continue;
+          
+          // Try to find the corresponding order
+          const orders = await this.counterparty.getFilledXCPFOLIOOrders(this.config.xcpfolioAddress);
+          const matchingOrder = orders.find(o => {
+            const orderAsset = (o.give_asset_info?.asset_longname || o.give_asset).replace('XCPFOLIO.', '');
+            return orderAsset === asset;
+          });
+          
+          if (matchingOrder) {
+            // Track this transaction
+            console.log(`Recovered unconfirmed transfer: ${asset} -> ${destination} (tx: ${tx_hash})`);
+            this.processingState.orderTransactions.set(matchingOrder.tx_hash, {
+              orderHash: matchingOrder.tx_hash,
+              asset,
+              buyer: destination,
+              txid: tx_hash,
+              originalTxid: tx_hash,
+              rbfHistory: [tx_hash],
+              broadcastTime: Date.now() - 60000, // Estimate 1 minute ago
+              broadcastBlock: currentBlock - 1,
+              feeRate: 10, // Default estimate
+              isRbf: false,
+              rbfCount: 0
+            });
+            
+            // Also mark as processed in state
+            this.state.markOrderProcessed(matchingOrder.tx_hash);
+          }
+        }
+      }
+      
+      console.log(`Active transactions after recovery: ${this.processingState.orderTransactions.size}`);
+    } catch (error) {
+      console.error('Error recovering mempool transactions:', error);
+      // Non-fatal - continue processing
+    }
   }
 
   private sleep(ms: number): Promise<void> {

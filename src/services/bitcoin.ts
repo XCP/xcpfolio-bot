@@ -371,6 +371,31 @@ export class BitcoinService {
   }
 
   /**
+   * Get the count of unconfirmed transactions for an address
+   */
+  async getUnconfirmedTxCount(address: string): Promise<number> {
+    try {
+      // Get all transactions for the address
+      const response = await axios.get(`${MEMPOOL_API}/address/${address}/txs`);
+      const txs = response.data || [];
+      
+      // Count unconfirmed transactions
+      return txs.filter((tx: any) => !tx.status?.confirmed).length;
+    } catch (error) {
+      console.error('Error getting unconfirmed tx count:', error);
+      return 0;
+    }
+  }
+
+  /**
+   * Check if address has too many unconfirmed transactions
+   */
+  async hasReachedMempoolLimit(address: string, limit: number = 25): Promise<boolean> {
+    const count = await this.getUnconfirmedTxCount(address);
+    return count >= limit;
+  }
+
+  /**
    * Get transaction details
    */
   async getTransaction(txid: string): Promise<any> {

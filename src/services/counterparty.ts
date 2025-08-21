@@ -197,32 +197,62 @@ export class CounterpartyService {
   }
 
   /**
-   * Check if asset has been transferred to an address
+   * Check if asset has been transferred to an address (confirmed or unconfirmed)
    */
   async isAssetTransferredTo(
     asset: string,
     toAddress: string,
     fromAddress: string
   ): Promise<boolean> {
-    const issuances = await this.getAssetIssuances(asset);
-    
-    // Look for a transfer from our address to the buyer
-    return issuances.some(issuance => 
-      issuance.transfer === true &&
-      issuance.source === fromAddress &&
-      issuance.issuer === toAddress
-    );
+    try {
+      // Use addresses/events to check ALL events (confirmed + unconfirmed) in one call
+      const params = new URLSearchParams({
+        addresses: fromAddress,
+        event_name: 'ASSET_ISSUANCE',
+        verbose: 'true',
+        show_unconfirmed: 'true',
+        limit: '500'
+      });
+      
+      const response = await this.request<any[]>(
+        `/addresses/events?${params.toString()}`,
+        'GET'
+      );
+      
+      // Look for a transfer of this asset to the buyer
+      const hasTransfer = response.some(event => {
+        const p = event.params;
+        return p?.asset === asset &&
+               p?.quantity === 0 && // Transfer (not issuance)
+               p?.transfer_destination === toAddress;
+      });
+      
+      if (hasTransfer) {
+        console.log(`Found transfer: ${asset} -> ${toAddress} (confirmed or pending)`);
+        return true;
+      }
+      
+      return false;
+    } catch (error) {
+      console.error('Error checking for asset transfer:', error);
+      // Fallback to original method
+      const issuances = await this.getAssetIssuances(asset);
+      return issuances.some(issuance => 
+        issuance.transfer === true &&
+        issuance.source === fromAddress &&
+        issuance.issuer === toAddress
+      );
+    }
   }
 
   /**
-   * Compose an issuance transfer transaction with UTXO support
+   * Compose an issuance transfer transaction
    */
   async composeTransfer(
     source: string,
     asset: string,
     destination: string,
     feeRate: number,
-    utxos?: UTXO[],
     encoding: 'auto' | 'opreturn' | 'multisig' | 'pubkeyhash' = 'auto',
     validate: boolean = true  // Set to false for RBF transactions
   ): Promise<string> {
@@ -237,11 +267,6 @@ export class CounterpartyService {
       validate: validate.toString(),
       allow_unconfirmed_inputs: 'true'
     });
-
-    // If UTXOs provided, format them for inputs_set
-    if (utxos && utxos.length > 0) {
-      params.append('inputs_set', utxos.map(u => `${u.txid}:${u.vout}`).join(','));
-    }
 
     // In v2 API, compose endpoints use query parameters
     const response = await this.request<ComposeResponse>(
@@ -396,5 +421,58 @@ export class CounterpartyService {
     }
     
     return orders;
+  }
+
+  /**
+   * Get unconfirmed events from mempool for our address
+   */
+  async getMempoolTransfers(source: string): Promise<any[]> {
+    try {
+      // Use the addresses/mempool endpoint to get all unconfirmed events
+      const params = new URLSearchParams({
+        addresses: source,
+        verbose: 'true'
+      });
+      
+      const response = await this.request<any[]>(
+        `/addresses/mempool?${params.toString()}`,
+        'GET'
+      );
+      
+      // Filter for asset issuance transfers (quantity=0 with transfer_destination)
+      return response.filter(event => {
+        return event.event === 'ASSET_ISSUANCE' &&
+               event.params?.quantity === 0 &&
+               event.params?.transfer_destination;
+      });
+    } catch (error) {
+      console.error('Error fetching mempool transfers:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Check if a transfer is already in mempool or confirmed
+   */
+  async hasUnconfirmedTransfer(asset: string, destination: string, source: string): Promise<boolean> {
+    try {
+      // Check mempool for unconfirmed transfers
+      const mempoolTransfers = await this.getMempoolTransfers(source);
+      
+      const exists = mempoolTransfers.some(transfer => {
+        return transfer.params?.asset === asset &&
+               transfer.params?.transfer_destination === destination;
+      });
+      
+      if (exists) {
+        console.log(`Found unconfirmed transfer in mempool: ${asset} -> ${destination}`);
+        return true;
+      }
+      
+      return false;
+    } catch (error) {
+      console.error('Error checking for unconfirmed transfer:', error);
+      return false;
+    }
   }
 }
