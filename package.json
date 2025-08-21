@@ -13,7 +13,8 @@
     "test:e2e": "jest tests/e2e",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
-    "check-orders": "tsx src/scripts/check-orders.ts"
+    "check-orders": "tsx scripts/check-orders.ts",
+    "backfill": "tsx scripts/backfill-orders.ts"
   },
   "dependencies": {
     "@noble/hashes": "^1.8.0",

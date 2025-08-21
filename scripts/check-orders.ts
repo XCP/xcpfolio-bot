@@ -1,10 +1,10 @@
 import 'dotenv/config';
-import { CounterpartyService } from '../services/counterparty';
-import { BitcoinService } from '../services/bitcoin';
-import { StateManager } from '../services/state';
+import { CounterpartyService } from '../src/services/counterparty';
+import { BitcoinService } from '../src/services/bitcoin';
+import { StateManager } from '../src/services/state';
 
 async function checkOrders() {
-  const xcpfolioAddress = process.env.XCPFOLIO_ADDRESS || '1BoTXcPiDFJgXMbydpRPDKKaqM1MbaEuSe';
+  const xcpfolioAddress = process.env.XCPFOLIO_ADDRESS || '1BotpWeW4cWRZ26rLvBCRHTeWtaH5fUYPX';
   
   console.log('='.repeat(60));
   console.log('XCPFOLIO Order Check');
