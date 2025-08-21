@@ -185,3 +185,4 @@ export class StateManager {
       await this.saveState();
     }
   }
+}
