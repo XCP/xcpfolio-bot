@@ -18,6 +18,7 @@ export interface FulfillmentConfig {
   maxTotalFeeSats?: number; // Maximum fee per transaction in satoshis (default: 10000 = 0.0001 BTC)
   maxFeeRateForNewTx?: number; // Maximum fee rate for new transactions in sat/vB (default: 100)
   orderHistoryPath?: string; // Path to save order history (default: .order-history.json)
+  statePath?: string; // Path to save fulfillment state (default: .fulfillment-state.json)
 }
 
 export interface ProcessResult {
@@ -116,7 +117,7 @@ export class FulfillmentProcessor {
 
     this.counterparty = new CounterpartyService();
     this.bitcoin = new BitcoinService(config.network || 'mainnet');
-    this.state = new StateManager();
+    this.state = new StateManager(config.statePath);
     this.orderHistory = new OrderHistoryService(config.orderHistoryPath);
     
     this.processingState = {
