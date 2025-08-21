@@ -100,11 +100,37 @@ export class OrderHistoryService {
 
   private async saveHistory(): Promise<void> {
     try {
-      const ordersArray = Array.from(this.orders.entries());
-      // Keep only the most recent orders, sorted by block height
-      const recentOrders = ordersArray
+      // Get existing index from Redis first
+      const existingIndex = await this.redis.get<string[]>('order-index') || [];
+      const existingSet = new Set(existingIndex);
+      
+      // Save all orders in memory (they've been updated/added)
+      for (const [hash, order] of this.orders.entries()) {
+        await this.redis.hset(`order:${hash}`, order as any);
+        await this.redis.expire(`order:${hash}`, 60 * 60 * 24 * 7); // 7 day TTL
+        existingSet.add(hash); // Add to index
+      }
+      
+      // Convert back to array and sort by recency (need to load all orders for proper sorting)
+      const allOrders: Array<[string, OrderStatus]> = [];
+      for (const hash of existingSet) {
+        const order = await this.redis.hgetall(`order:${hash}`);
+        if (order) {
+          // Parse numeric fields
+          const parsedOrder: OrderStatus = {
+            ...order,
+            price: typeof order.price === 'string' ? parseFloat(order.price) : order.price,
+            purchasedAt: typeof order.purchasedAt === 'string' ? parseInt(order.purchasedAt) : order.purchasedAt,
+            lastUpdated: typeof order.lastUpdated === 'string' ? parseInt(order.lastUpdated) : order.lastUpdated,
+            purchasedBlock: order.purchasedBlock ? (typeof order.purchasedBlock === 'string' ? parseInt(order.purchasedBlock) : order.purchasedBlock) : undefined,
+          } as OrderStatus;
+          allOrders.push([hash, parsedOrder]);
+        }
+      }
+      
+      // Sort and keep only the most recent
+      const sortedOrders = allOrders
         .sort((a, b) => {
-          // Sort by purchasedBlock if available (newest first), otherwise by lastUpdated
           if (a[1].purchasedBlock && b[1].purchasedBlock) {
             return b[1].purchasedBlock - a[1].purchasedBlock;
           }
@@ -112,14 +138,8 @@ export class OrderHistoryService {
         })
         .slice(0, this.maxOrders);
       
-      // Save each order individually
-      for (const [hash, order] of recentOrders) {
-        await this.redis.hset(`order:${hash}`, order as any);
-        await this.redis.expire(`order:${hash}`, 60 * 60 * 24 * 7); // 7 day TTL
-      }
-      
-      // Update index
-      const orderHashes = recentOrders.map(([hash]) => hash);
+      // Update index with sorted order hashes
+      const orderHashes = sortedOrders.map(([hash]) => hash);
       await this.redis.set('order-index', JSON.stringify(orderHashes), {
         ex: 60 * 60 * 24 * 7
       });

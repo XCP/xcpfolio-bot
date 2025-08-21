@@ -216,20 +216,86 @@ export class FulfillmentProcessor {
       console.log('Fetching filled orders...');
       const orders = await this.counterparty.getFilledXCPFOLIOOrders(this.config.xcpfolioAddress);
       
-      // Filter to only recent orders (optimization)
-      const lastProcessedBlock = await this.state.getLastBlock();
-      const newOrders = orders.filter(o => !lastProcessedBlock || o.block_index > lastProcessedBlock);
+      // Get processed orders set for checking
+      const processedOrders = await this.state.getProcessedOrders();
       
-      if (newOrders.length === 0) {
-        console.log('No new filled orders found');
-        await this.state.setLastBlock(currentBlock);
+      // Filter to unprocessed orders and check for already transferred assets
+      const unprocessedOrders: Order[] = [];
+      let consecutiveProcessed = 0;
+      const stopAfterConsecutive = 10; // Stop after finding 10 consecutive already-processed orders
+      
+      for (const order of orders) {
+        // Check if we've already processed this exact order
+        if (processedOrders.has(order.tx_hash)) {
+          consecutiveProcessed++;
+          console.log(`Order ${order.tx_hash} already in processed list (${consecutiveProcessed} consecutive)`);
+          
+          // Stop checking if we've seen enough consecutive processed orders
+          // This prevents checking ancient history every time
+          if (consecutiveProcessed >= stopAfterConsecutive) {
+            console.log(`Found ${stopAfterConsecutive} consecutive processed orders, stopping scan`);
+            break;
+          }
+          continue;
+        }
+        
+        // Reset counter since we found an unprocessed order
+        consecutiveProcessed = 0;
+        
+        // Check if asset has already been transferred (double-check via Counterparty)
+        const assetName = (order.give_asset_info?.asset_longname || order.give_asset).replace('XCPFOLIO.', '');
+        
+        try {
+          const assetInfo = await this.counterparty.getAssetInfo(assetName);
+          // Get the buyer address from order matches
+          const matches = await this.counterparty.getOrderMatches(order.tx_hash);
+          if (matches && matches.length > 0) {
+            const match = matches[0];
+            const buyer = match.tx0_address === this.config.xcpfolioAddress 
+              ? match.tx1_address 
+              : match.tx0_address;
+            
+            // If buyer already owns the asset, mark as processed and skip
+            if (assetInfo.owner === buyer) {
+              console.log(`Asset ${assetName} already owned by buyer ${buyer}, marking as processed`);
+              await this.state.markOrderProcessed(order.tx_hash);
+              
+              // Update order history to show it's confirmed (for display only)
+              await this.orderHistory.upsertOrder({
+                orderHash: order.tx_hash,
+                asset: assetName,
+                assetLongname: order.give_asset_info?.asset_longname || undefined,
+                price: order.get_quantity / 100000000,
+                buyer,
+                seller: this.config.xcpfolioAddress,
+                status: 'confirmed',
+                stage: 'confirmed',
+                purchasedAt: order.block_time ? order.block_time * 1000 : Date.now(),
+                purchasedBlock: order.block_index,
+                confirmedAt: Date.now(),
+                lastUpdated: Date.now()
+              });
+              continue;
+            }
+          }
+        } catch (error) {
+          console.error(`Error checking asset ${assetName}:`, error);
+        }
+        
+        // This order needs processing
+        unprocessedOrders.push(order);
+      }
+      
+      if (unprocessedOrders.length === 0) {
+        console.log(`No unprocessed orders found (checked ${orders.length} total)`);
+        // Don't update lastBlock anymore - we're not using it for filtering
         return results;
       }
 
-      console.log(`Found ${newOrders.length} new filled orders (${orders.length} total)`);
+      console.log(`Found ${unprocessedOrders.length} unprocessed orders to fulfill`);
       
       // Notify about new confirmed orders
-      for (const order of newOrders) {
+      for (const order of unprocessedOrders) {
         const assetName = (order.give_asset_info?.asset_longname || order.give_asset).replace('XCPFOLIO.', '');
         await NotificationService.success('✅ Order filled & confirmed!', {
           asset: assetName,
@@ -239,7 +305,7 @@ export class FulfillmentProcessor {
       }
 
       // 6. Process new orders sequentially
-      for (const order of newOrders) {
+      for (const order of unprocessedOrders) {
         // Check if we should stop
         if (this.shouldStop) {
           console.log('Stop requested, halting processing');
