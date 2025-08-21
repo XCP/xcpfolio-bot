@@ -85,6 +85,11 @@ export class CounterpartyService {
         config.data = data;
       }
 
+      console.log(`[Counterparty API] ${method} ${url}`);
+      if (data) {
+        console.log('[Counterparty API] Request body:', JSON.stringify(data, null, 2));
+      }
+
       const response = await axios(config);
       
       if (response.data.error) {
@@ -94,6 +99,12 @@ export class CounterpartyService {
       return response.data.result;
     } catch (error) {
       if (axios.isAxiosError(error)) {
+        console.error('[Counterparty API] Error response:', {
+          status: error.response?.status,
+          statusText: error.response?.statusText,
+          data: error.response?.data,
+          url: error.config?.url
+        });
         const errorMessage = error.response?.data?.error?.message || error.message;
         throw new Error(`Counterparty API error: ${errorMessage}`);
       }
