@@ -98,23 +98,31 @@ async function backfillOrders() {
           }
         }
 
-        const orderData = {
+        const orderData: any = {
           orderHash: order.tx_hash,
           asset: assetName,
-          assetLongname: order.give_asset_info?.asset_longname,
           price: order.get_quantity / 100000000, // Convert to XCP
           buyer,
           seller: xcpfolioAddress,
           status,
           stage: status === 'confirmed' ? 'confirmed' : 'broadcast',
           purchasedAt: order.block_time || Date.now(),
-          confirmedAt: status === 'confirmed' ? order.block_time : undefined,
-          txid,
           lastUpdated: Date.now()
         };
 
+        // Add optional fields only if they have values
+        if (order.give_asset_info?.asset_longname) {
+          orderData.assetLongname = order.give_asset_info.asset_longname;
+        }
+        if (status === 'confirmed' && order.block_time) {
+          orderData.confirmedAt = order.block_time;
+        }
+        if (txid) {
+          orderData.txid = txid;
+        }
+
         // Save to KV
-        await redis.hset(`order:${order.tx_hash}`, orderData as any);
+        await redis.hset(`order:${order.tx_hash}`, orderData);
         await redis.expire(`order:${order.tx_hash}`, 60 * 60 * 24 * 30); // 30 day TTL for backfill
         
         orderIndex.unshift(order.tx_hash);
