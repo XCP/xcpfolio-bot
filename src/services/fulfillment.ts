@@ -690,7 +690,7 @@ export class FulfillmentProcessor {
         });
         
         // Update order history with txid
-        await this.orderHistory.updateOrderStatus(order.tx_hash, 'broadcasting', 'mempool', txid);
+        await this.orderHistory.updateOrderStatus(order.tx_hash, 'confirming', 'mempool', txid);
 
         // Track the transaction with RBF history
         this.processingState.orderTransactions.set(order.tx_hash, {
@@ -1178,8 +1178,9 @@ export class FulfillmentProcessor {
       const mempoolEvents = await this.counterparty.getMempoolTransfers(this.config.xcpfolioAddress);
       
       for (const event of mempoolEvents) {
-        if (event.params?.asset && event.params?.transfer_destination) {
-          const key = `${event.params.asset}:${event.params.transfer_destination}`;
+        if (event.params?.asset && event.params?.issuer) {
+          // issuer is the new owner for transfers
+          const key = `${event.params.asset}:${event.params.issuer}`;
           pending.add(key);
           console.log(`Pending transfer: ${key}`);
         }

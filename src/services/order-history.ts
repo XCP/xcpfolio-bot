@@ -12,12 +12,13 @@ export interface OrderStatus {
   price: number; // In XCP
   buyer: string;
   seller: string;
-  status: 'unconfirmed' | 'listing' | 'pending' | 'processing' | 'broadcasting' | 'confirmed' | 'failed' | 'permanently_failed';
+  status: 'unconfirmed' | 'listing' | 'pending' | 'processing' | 'broadcasting' | 'confirming' | 'confirmed' | 'failed' | 'permanently_failed';
   stage?: 'mempool' | 'listing' | 'validation' | 'compose' | 'sign' | 'broadcast' | 'confirmed';
   confirmations?: number; // 0 for mempool, 1+ for confirmed
   orderType?: 'open' | 'filled'; // To distinguish between listing and sale
-  purchasedAt: number; // Block time or timestamp
-  deliveredAt?: number; // When transaction was broadcast
+  purchasedAt: number; // Block time or timestamp  
+  broadcastAt?: number; // When transfer tx was broadcast
+  deliveredAt?: number; // When transfer tx was confirmed (delivery complete)
   confirmedAt?: number; // When transaction was confirmed
   txid?: string;
   error?: string;
@@ -135,14 +136,19 @@ export class OrderHistoryService {
       if (error) order.error = error;
       order.lastUpdated = Date.now();
       
-      // Set delivery time when broadcast
-      if (status === 'broadcasting' && !order.deliveredAt) {
-        order.deliveredAt = Date.now();
+      // Set broadcast time when initially sent
+      if ((status === 'broadcasting' || status === 'confirming') && !order.broadcastAt) {
+        order.broadcastAt = Date.now();
       }
       
-      // Set confirmation time
-      if (status === 'confirmed' && !order.confirmedAt) {
-        order.confirmedAt = Date.now();
+      // Set delivery/confirmation time when transfer is confirmed
+      if (status === 'confirmed') {
+        if (!order.confirmedAt) {
+          order.confirmedAt = Date.now();
+        }
+        if (!order.deliveredAt) {
+          order.deliveredAt = Date.now(); // Delivery complete when confirmed
+        }
       }
       
       await this.saveHistory();

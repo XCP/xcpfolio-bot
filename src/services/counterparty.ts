@@ -439,11 +439,11 @@ export class CounterpartyService {
         'GET'
       );
       
-      // Filter for asset issuance transfers (quantity=0 with transfer_destination)
+      // Filter for asset issuance transfers (ownership changes)
       return response.filter(event => {
         return event.event === 'ASSET_ISSUANCE' &&
-               event.params?.quantity === 0 &&
-               event.params?.transfer_destination;
+               event.params?.asset_events === 'transfer' &&
+               event.params?.transfer === true;
       });
     } catch (error) {
       console.error('Error fetching mempool transfers:', error);
@@ -461,7 +461,7 @@ export class CounterpartyService {
       
       const exists = mempoolTransfers.some(transfer => {
         return transfer.params?.asset === asset &&
-               transfer.params?.transfer_destination === destination;
+               transfer.params?.issuer === destination;  // issuer is the new owner for transfers
       });
       
       if (exists) {

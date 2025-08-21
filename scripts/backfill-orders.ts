@@ -60,53 +60,58 @@ async function backfillOrders() {
         const assetName = (order.give_asset_info?.asset_longname || order.give_asset)
           .replace('XCPFOLIO.', '');
         
-        // Check if transfer exists
-        const hasTransfer = await counterparty.isAssetTransferredTo(
-          assetName,
-          buyer,
-          xcpfolioAddress
-        );
+        // Check if transfer exists by seeing if buyer now owns the asset
+        const assetInfo = await counterparty.getAssetInfo(assetName);
+        const hasTransfer = assetInfo.owner === buyer;
 
         let status = 'pending';
         let txid = undefined;
         
         if (hasTransfer) {
-          // Check if in mempool or confirmed
-          const mempoolTransfers = await counterparty.getMempoolTransfers(xcpfolioAddress);
-          const inMempool = mempoolTransfers.some(t => 
-            t.params?.asset === assetName && 
-            t.params?.transfer_destination === buyer
+          // If buyer owns it, it's confirmed
+          status = 'confirmed';
+          
+          // Try to get the transfer txid from issuances
+          const issuances = await counterparty.getAssetIssuances(assetName);
+          const transfer = issuances.find(i => 
+            i.transfer === true &&
+            i.source === xcpfolioAddress &&
+            i.issuer === buyer
+          );
+          if (transfer) {
+            txid = transfer.tx_hash;
+          }
+        } else {
+          // Check if there's a pending transfer in mempool
+          // Get all mempool events for our address
+          const mempoolEvents = await counterparty.request(
+            `/addresses/mempool?addresses=${xcpfolioAddress}&verbose=true`
+          );
+          
+          // Look for asset issuance transfers (ownership changes)
+          const inMempool = mempoolEvents.find((event: any) => 
+            event.event === 'ASSET_ISSUANCE' &&
+            event.params?.asset === assetName &&
+            event.params?.asset_events === 'transfer' &&
+            event.params?.issuer === buyer  // issuer is the new owner for transfers
           );
           
           if (inMempool) {
-            status = 'mempool';
-            const transfer = mempoolTransfers.find(t => 
-              t.params?.asset === assetName && 
-              t.params?.transfer_destination === buyer
-            );
-            txid = transfer?.tx_hash;
-          } else {
-            status = 'confirmed';
-            // Get transfer txid from issuances
-            const issuances = await counterparty.getAssetIssuances(assetName);
-            const transfer = issuances.find(i => 
-              i.transfer === true &&
-              i.source === xcpfolioAddress &&
-              i.issuer === buyer
-            );
-            txid = transfer?.tx_hash;
+            status = 'confirming';  // In mempool, waiting for confirmation
+            txid = inMempool.tx_hash;
           }
         }
 
         const orderData: any = {
           orderHash: order.tx_hash,
           asset: assetName,
-          price: order.get_quantity / 100000000, // Convert to XCP
+          price: (order.get_quantity / 100000000).toFixed(8), // Format to 8 decimals
           buyer,
           seller: xcpfolioAddress,
           status,
           stage: status === 'confirmed' ? 'confirmed' : 'broadcast',
-          purchasedAt: order.block_time || Date.now(),
+          purchasedAt: order.block_time ? order.block_time * 1000 : Date.now(), // Convert seconds to ms
+          purchasedBlock: order.block_index,
           lastUpdated: Date.now()
         };
 
@@ -114,8 +119,17 @@ async function backfillOrders() {
         if (order.give_asset_info?.asset_longname) {
           orderData.assetLongname = order.give_asset_info.asset_longname;
         }
-        if (status === 'confirmed' && order.block_time) {
-          orderData.confirmedAt = order.block_time;
+        if (status === 'confirmed') {
+          // For confirmed orders where the asset is now owned by buyer
+          orderData.confirmedBlock = order.block_index;
+          
+          // For backfilled historical data, we don't have the exact transfer tx confirmation time
+          // We only know the order was filled and the transfer happened sometime after
+          // Don't set deliveredAt for backfilled data - let the frontend handle it
+          if (order.block_time) {
+            orderData.confirmedAt = order.block_time * 1000; // When order was filled
+            // Note: deliveredAt would be when our transfer tx confirmed, but we don't have that for historical data
+          }
         }
         if (txid) {
           orderData.txid = txid;
@@ -125,7 +139,7 @@ async function backfillOrders() {
         await redis.hset(`order:${order.tx_hash}`, orderData);
         await redis.expire(`order:${order.tx_hash}`, 60 * 60 * 24 * 30); // 30 day TTL for backfill
         
-        orderIndex.unshift(order.tx_hash);
+        orderIndex.push(order.tx_hash);
         processed++;
         
         console.log(`✅ Processed ${order.tx_hash}: ${assetName} -> ${buyer} (${status})`);
@@ -139,9 +153,11 @@ async function backfillOrders() {
       }
     }
 
-    // Save the index
+    // Save the index - reverse it so newest is first
     if (orderIndex.length > 0) {
-      await redis.set('order-index', JSON.stringify(orderIndex.slice(0, 100)), {
+      // Reverse the array since we pushed in order but want newest first
+      const reversedIndex = orderIndex.reverse();
+      await redis.set('order-index', JSON.stringify(reversedIndex.slice(0, 100)), {
         ex: 60 * 60 * 24 * 30
       });
     }
