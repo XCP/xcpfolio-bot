@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XCPFOLIO Fulfillment Bot</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: #0a0a0a;
+            color: #ffffff;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            max-width: 600px;
+            text-align: center;
+        }
+        h1 {
+            font-size: 2.5rem;
+            margin-bottom: 1rem;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .status {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 12px;
+            padding: 2rem;
+            margin: 2rem 0;
+        }
+        .status-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.75rem 0;
+            border-bottom: 1px solid #333;
+        }
+        .status-item:last-child {
+            border-bottom: none;
+        }
+        .status-label {
+            color: #888;
+            font-size: 0.9rem;
+        }
+        .status-value {
+            font-weight: 600;
+            font-family: 'Courier New', monospace;
+        }
+        .status-value.active {
+            color: #4ade80;
+        }
+        .status-value.inactive {
+            color: #ef4444;
+        }
+        .status-value.warning {
+            color: #fbbf24;
+        }
+        .links {
+            margin-top: 2rem;
+            display: flex;
+            gap: 1rem;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+        .link {
+            color: #667eea;
+            text-decoration: none;
+            padding: 0.5rem 1rem;
+            border: 1px solid #667eea;
+            border-radius: 6px;
+            transition: all 0.2s;
+        }
+        .link:hover {
+            background: #667eea;
+            color: white;
+        }
+        .info {
+            margin-top: 2rem;
+            padding: 1rem;
+            background: #1a1a1a;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            color: #888;
+            line-height: 1.6;
+        }
+        .pulse {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #4ade80;
+            animation: pulse 2s infinite;
+            margin-left: 8px;
+        }
+        @keyframes pulse {
+            0% {
+                box-shadow: 0 0 0 0 rgba(74, 222, 128, 0.7);
+            }
+            70% {
+                box-shadow: 0 0 0 10px rgba(74, 222, 128, 0);
+            }
+            100% {
+                box-shadow: 0 0 0 0 rgba(74, 222, 128, 0);
+            }
+        }
+        .logo {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">🤖</div>
+        <h1>XCPFOLIO Bot</h1>
+        <p style="color: #888; margin-bottom: 2rem;">Automated Counterparty DEX Fulfillment Service</p>
+        
+        <div class="status" id="status">
+            <div class="status-item">
+                <span class="status-label">Service Status</span>
+                <span class="status-value" id="service-status">
+                    <span id="status-text">Checking...</span>
+                    <span class="pulse" id="pulse" style="display: none;"></span>
+                </span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Network</span>
+                <span class="status-value" id="network">...</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Mode</span>
+                <span class="status-value" id="mode">...</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Last Check</span>
+                <span class="status-value" id="last-check">...</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Version</span>
+                <span class="status-value" id="version">...</span>
+            </div>
+        </div>
+
+        <div class="info">
+            This bot monitors the Counterparty DEX for filled XCPFOLIO.* orders and automatically transfers asset ownership to buyers. 
+            It runs every minute to check for new orders requiring fulfillment.
+        </div>
+
+        <div class="links">
+            <a href="https://xcpfolio.com" class="link">Main Site</a>
+            <a href="https://xcpfolio.com/status" class="link">Order Status</a>
+            <a href="https://xcpfolio.com/how-it-works" class="link">How It Works</a>
+            <a href="/api/health" class="link">API Health</a>
+        </div>
+    </div>
+
+    <script>
+        async function checkHealth() {
+            try {
+                const response = await fetch('/api/health');
+                const data = await response.json();
+                
+                // Update status
+                const statusEl = document.getElementById('service-status');
+                const statusText = document.getElementById('status-text');
+                const pulse = document.getElementById('pulse');
+                
+                if (data.status === 'healthy') {
+                    statusText.textContent = 'Active';
+                    statusEl.className = 'status-value active';
+                    pulse.style.display = 'inline-block';
+                } else {
+                    statusText.textContent = 'Inactive';
+                    statusEl.className = 'status-value inactive';
+                    pulse.style.display = 'none';
+                }
+                
+                // Update network
+                document.getElementById('network').textContent = data.network || 'mainnet';
+                document.getElementById('network').className = 'status-value';
+                
+                // Update mode
+                const modeEl = document.getElementById('mode');
+                if (data.dryRun) {
+                    modeEl.textContent = 'Dry Run';
+                    modeEl.className = 'status-value warning';
+                } else {
+                    modeEl.textContent = 'Live';
+                    modeEl.className = 'status-value active';
+                }
+                
+                // Update version
+                document.getElementById('version').textContent = data.version || '1.0.0';
+                
+                // Update last check
+                const now = new Date().toLocaleTimeString();
+                document.getElementById('last-check').textContent = now;
+                
+            } catch (error) {
+                console.error('Health check failed:', error);
+                document.getElementById('status-text').textContent = 'Offline';
+                document.getElementById('service-status').className = 'status-value inactive';
+                document.getElementById('pulse').style.display = 'none';
+                document.getElementById('last-check').textContent = 'Failed';
+            }
+        }
+        
+        // Check health on load
+        checkHealth();
+        
+        // Check health every 30 seconds
+        setInterval(checkHealth, 30000);
+    </script>
+</body>
+</html>

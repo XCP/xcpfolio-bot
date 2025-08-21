@@ -1,7 +1,7 @@
 import { Transaction, p2pkh, SigHash } from '@scure/btc-signer';
 import { hexToBytes, bytesToHex } from '@noble/hashes/utils';
 import { sha256 } from '@noble/hashes/sha256';
-import { getPublicKey } from '@noble/secp256k1';
+import * as secp256k1 from 'secp256k1';
 import { base58check } from '@scure/base';
 import axios from 'axios';
 import { API_CONFIG, TX_SIZE, TIME } from '../constants';
@@ -166,7 +166,7 @@ export class BitcoinService {
       // Convert WIF to hex
       const privateKeyHex = wifToPrivateKey(privateKeyWIF);
       const privateKeyBytes = hexToBytes(privateKeyHex);
-      const pubkeyBytes = getPublicKey(privateKeyBytes, true); // compressed
+      const pubkeyBytes = secp256k1.publicKeyCreate(privateKeyBytes, true); // compressed
       
       // Create P2PKH payment script
       const payment = p2pkh(pubkeyBytes);
