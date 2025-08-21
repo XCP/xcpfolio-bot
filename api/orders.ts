@@ -126,9 +126,31 @@ async function getRecentOrders(limit: number): Promise<any[]> {
     for (const hash of orderHashes) {
       const order = await redis.hgetall(`${ORDER_KEY_PREFIX}:${hash}`);
       if (order) {
-        orders.push(order);
+        // Parse numeric fields from Redis strings
+        const parsedOrder = {
+          ...order,
+          price: typeof order.price === 'string' ? parseFloat(order.price) : order.price,
+          purchasedAt: typeof order.purchasedAt === 'string' ? parseInt(order.purchasedAt) : order.purchasedAt,
+          lastUpdated: typeof order.lastUpdated === 'string' ? parseInt(order.lastUpdated) : order.lastUpdated,
+          purchasedBlock: order.purchasedBlock ? (typeof order.purchasedBlock === 'string' ? parseInt(order.purchasedBlock) : order.purchasedBlock) : undefined,
+          confirmedBlock: order.confirmedBlock ? (typeof order.confirmedBlock === 'string' ? parseInt(order.confirmedBlock) : order.confirmedBlock) : undefined,
+          broadcastAt: order.broadcastAt ? (typeof order.broadcastAt === 'string' ? parseInt(order.broadcastAt) : order.broadcastAt) : undefined,
+          deliveredAt: order.deliveredAt ? (typeof order.deliveredAt === 'string' ? parseInt(order.deliveredAt) : order.deliveredAt) : undefined,
+          confirmedAt: order.confirmedAt ? (typeof order.confirmedAt === 'string' ? parseInt(order.confirmedAt) : order.confirmedAt) : undefined,
+          confirmations: order.confirmations ? (typeof order.confirmations === 'string' ? parseInt(order.confirmations) : order.confirmations) : undefined,
+          retryCount: order.retryCount ? (typeof order.retryCount === 'string' ? parseInt(order.retryCount) : order.retryCount) : undefined,
+        };
+        orders.push(parsedOrder);
       }
     }
+    
+    // Sort by purchasedBlock (newest/highest first) or lastUpdated
+    orders.sort((a, b) => {
+      if (a.purchasedBlock && b.purchasedBlock) {
+        return b.purchasedBlock - a.purchasedBlock;
+      }
+      return (b.lastUpdated || 0) - (a.lastUpdated || 0);
+    });
     
     return orders;
   } catch (error) {
