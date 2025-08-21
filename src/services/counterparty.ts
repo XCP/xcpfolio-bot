@@ -190,6 +190,7 @@ export class CounterpartyService {
   async getAssetIssuances(asset: string): Promise<Issuance[]> {
     const params = new URLSearchParams({
       show_unconfirmed: 'true',
+      verbose: 'true',  // Include block_time in response
       limit: '100',
     });
 
