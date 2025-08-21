@@ -16,10 +16,12 @@ export interface OrderStatus {
   stage?: 'mempool' | 'listing' | 'validation' | 'compose' | 'sign' | 'broadcast' | 'confirmed';
   confirmations?: number; // 0 for mempool, 1+ for confirmed
   orderType?: 'open' | 'filled'; // To distinguish between listing and sale
-  purchasedAt: number; // Block time or timestamp  
+  purchasedAt: number; // Block time or timestamp
+  purchasedBlock?: number; // Block height when order was filled
   broadcastAt?: number; // When transfer tx was broadcast
   deliveredAt?: number; // When transfer tx was confirmed (delivery complete)
   confirmedAt?: number; // When transaction was confirmed
+  confirmedBlock?: number; // Block height when transfer was confirmed
   txid?: string;
   error?: string;
   retryCount?: number;
@@ -84,9 +86,15 @@ export class OrderHistoryService {
   private async saveHistory(): Promise<void> {
     try {
       const ordersArray = Array.from(this.orders.entries());
-      // Keep only the most recent orders
+      // Keep only the most recent orders, sorted by block height
       const recentOrders = ordersArray
-        .sort((a, b) => b[1].lastUpdated - a[1].lastUpdated)
+        .sort((a, b) => {
+          // Sort by purchasedBlock if available (newest first), otherwise by lastUpdated
+          if (a[1].purchasedBlock && b[1].purchasedBlock) {
+            return b[1].purchasedBlock - a[1].purchasedBlock;
+          }
+          return b[1].lastUpdated - a[1].lastUpdated;
+        })
         .slice(0, this.maxOrders);
       
       // Save each order individually
@@ -193,7 +201,13 @@ export class OrderHistoryService {
   async getOrders(): Promise<OrderStatus[]> {
     await this.loadHistory();
     return Array.from(this.orders.values())
-      .sort((a, b) => b.lastUpdated - a.lastUpdated);
+      .sort((a, b) => {
+        // Sort by purchasedBlock if available (newest first), otherwise by lastUpdated
+        if (a.purchasedBlock && b.purchasedBlock) {
+          return b.purchasedBlock - a.purchasedBlock;
+        }
+        return b.lastUpdated - a.lastUpdated;
+      });
   }
 
   /**
