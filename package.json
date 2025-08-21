@@ -16,7 +16,9 @@
     "check-orders": "tsx scripts/check-orders.ts",
     "backfill": "tsx scripts/backfill-orders.ts",
     "reset-last-block": "tsx scripts/reset-last-block.ts",
-    "clear-processed": "tsx scripts/clear-processed-orders.ts"
+    "clear-processed": "tsx scripts/clear-processed-orders.ts",
+    "fix-timestamps": "tsx scripts/fix-timestamps.ts",
+    "update-delivery": "tsx scripts/update-delivery-times.ts"
   },
   "dependencies": {
     "@noble/hashes": "^1.8.0",

@@ -15,6 +15,7 @@ if (fs.existsSync(localEnvPath)) {
 import * as cron from 'node-cron';
 import { FulfillmentProcessor } from './services/fulfillment';
 import { OrderHistoryService } from './services/order-history';
+import { ConfirmationMonitor } from './services/confirmation-monitor';
 import { startApiServer } from './api-server';
 
 // Validate environment variables
@@ -203,14 +204,20 @@ async function main() {
   const apiServer = startApiServer(processor.orderHistory);
   console.log(`API server: http://localhost:${process.env.API_PORT || 3001}`);
 
+  // Initialize confirmation monitor
+  const confirmationMonitor = new ConfirmationMonitor(processor.orderHistory);
+
   // Start health check server
   await startHealthCheck();
 
   // Run immediately on startup
   console.log('\nRunning initial check...');
   await runFulfillment();
+  
+  // Also check confirmations on startup
+  await confirmationMonitor.checkConfirmations();
 
-  // Schedule based on CHECK_INTERVAL
+  // Schedule fulfillment based on CHECK_INTERVAL
   const checkInterval = process.env.CHECK_INTERVAL || '* * * * *';
   cron.schedule(checkInterval, async () => {
     // Only run if not already processing
@@ -222,7 +229,13 @@ async function main() {
     await runFulfillment();
   });
   
-  console.log(`\nScheduled: ${checkInterval}`);
+  // Schedule confirmation checks every 30 seconds
+  cron.schedule('*/30 * * * * *', async () => {
+    await confirmationMonitor.checkConfirmations();
+  });
+  
+  console.log(`\nScheduled fulfillment: ${checkInterval}`);
+  console.log('Scheduled confirmations: every 30 seconds');
   console.log('Press Ctrl+C to stop\n');
 }
 
