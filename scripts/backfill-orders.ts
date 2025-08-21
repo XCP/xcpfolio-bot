@@ -66,12 +66,14 @@ async function backfillOrders() {
 
         let status = 'pending';
         let txid = undefined;
+        let deliveryBlock = undefined;
+        let deliveryTime = undefined;
         
         if (hasTransfer) {
           // If buyer owns it, it's confirmed
           status = 'confirmed';
           
-          // Try to get the transfer txid from issuances
+          // Try to get the transfer txid and block info from issuances
           const issuances = await counterparty.getAssetIssuances(assetName);
           const transfer = issuances.find(i => 
             i.transfer === true &&
@@ -80,6 +82,11 @@ async function backfillOrders() {
           );
           if (transfer) {
             txid = transfer.tx_hash;
+            deliveryBlock = transfer.block_index;
+            // Transfer block_time is when the transfer was confirmed
+            if (transfer.block_time) {
+              deliveryTime = transfer.block_time * 1000; // Convert to ms
+            }
           }
         } else {
           // Check if there's a pending transfer in mempool
@@ -121,14 +128,18 @@ async function backfillOrders() {
         }
         if (status === 'confirmed') {
           // For confirmed orders where the asset is now owned by buyer
-          orderData.confirmedBlock = order.block_index;
+          // Use the actual delivery block from the transfer, not the order block
+          if (deliveryBlock) {
+            orderData.confirmedBlock = deliveryBlock; // Block where transfer confirmed
+          }
           
-          // For backfilled historical data, we don't have the exact transfer tx confirmation time
-          // We only know the order was filled and the transfer happened sometime after
-          // Don't set deliveredAt for backfilled data - let the frontend handle it
-          if (order.block_time) {
-            orderData.confirmedAt = order.block_time * 1000; // When order was filled
-            // Note: deliveredAt would be when our transfer tx confirmed, but we don't have that for historical data
+          // Set delivery time if we have it from the transfer
+          if (deliveryTime) {
+            orderData.deliveredAt = deliveryTime; // When transfer tx confirmed
+            orderData.confirmedAt = deliveryTime; // Also set confirmedAt
+          } else if (order.block_time) {
+            // Fallback: use order time if we don't have transfer time
+            orderData.confirmedAt = order.block_time * 1000;
           }
         }
         if (txid) {
