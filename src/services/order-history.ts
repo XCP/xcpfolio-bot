@@ -106,7 +106,14 @@ export class OrderHistoryService {
       
       // Save all orders in memory (they've been updated/added)
       for (const [hash, order] of this.orders.entries()) {
-        await this.redis.hset(`order:${hash}`, order as any);
+        // Clean up null/undefined values before saving to Redis
+        const cleanOrder: any = {};
+        for (const [key, value] of Object.entries(order)) {
+          if (value !== null && value !== undefined) {
+            cleanOrder[key] = value;
+          }
+        }
+        await this.redis.hset(`order:${hash}`, cleanOrder);
         await this.redis.expire(`order:${hash}`, 60 * 60 * 24 * 7); // 7 day TTL
         existingSet.add(hash); // Add to index
       }

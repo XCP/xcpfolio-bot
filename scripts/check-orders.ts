@@ -27,11 +27,12 @@ async function checkOrders() {
     console.log();
 
     // Get current state
-    const currentState = state.getState();
+    const currentState = await state.getState();
+    const processedOrders = await state.getProcessedOrders();
     console.log('Current State:');
     console.log(`  Last Block Checked: ${currentState.lastBlock}`);
     console.log(`  Last Order Hash: ${currentState.lastOrderHash || 'none'}`);
-    console.log(`  Processed Orders: ${currentState.processedOrders.size}`);
+    console.log(`  Processed Orders: ${processedOrders.size}`);
     console.log(`  Last Checked: ${currentState.lastChecked ? new Date(currentState.lastChecked).toISOString() : 'never'}`);
     console.log();
 
