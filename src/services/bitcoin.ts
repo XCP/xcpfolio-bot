@@ -342,9 +342,16 @@ export class BitcoinService {
               return match[0];
             }
           }
+          
+          // Log the actual error response for debugging
+          console.error(`Failed to broadcast via ${endpoint.name}:`, {
+            status: error.response.status,
+            statusText: error.response.statusText,
+            error: error.response.data
+          });
+        } else {
+          console.error(`Failed to broadcast via ${endpoint.name}:`, error instanceof Error ? error.message : String(error));
         }
-        
-        console.warn(`Failed to broadcast via ${endpoint.name}:`, error instanceof Error ? error.message : String(error));
       }
     }
 
