@@ -17,6 +17,7 @@ export interface FulfillmentConfig {
   stuckTxThreshold?: number; // Blocks before considering tx stuck (default: 3)
   maxTotalFeeSats?: number; // Maximum fee per transaction in satoshis (default: 10000 = 0.0001 BTC)
   maxFeeRateForNewTx?: number; // Maximum fee rate for new transactions in sat/vB (default: 100)
+  orderHistoryPath?: string; // Path to save order history (default: .order-history.json)
 }
 
 export interface ProcessResult {
@@ -116,7 +117,7 @@ export class FulfillmentProcessor {
     this.counterparty = new CounterpartyService();
     this.bitcoin = new BitcoinService(config.network || 'mainnet');
     this.state = new StateManager();
-    this.orderHistory = new OrderHistoryService();
+    this.orderHistory = new OrderHistoryService(config.orderHistoryPath);
     
     this.processingState = {
       orderTransactions: new Map(),
