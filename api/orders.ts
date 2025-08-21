@@ -98,7 +98,27 @@ async function getRecentOrders(limit: number): Promise<any[]> {
   try {
     // Get the index of recent order hashes
     const indexData = await redis.get(ORDER_INDEX_KEY);
-    const index = indexData ? JSON.parse(indexData as string) : [];
+    
+    let index: string[] = [];
+    if (indexData) {
+      try {
+        // Check if it's already an array (shouldn't be, but check)
+        if (Array.isArray(indexData)) {
+          index = indexData;
+        } else if (typeof indexData === 'string') {
+          // Try to parse as JSON
+          index = JSON.parse(indexData);
+        } else {
+          console.error('Unexpected index data type:', typeof indexData, indexData);
+        }
+      } catch (parseError) {
+        console.error('Failed to parse order index:', parseError);
+        console.error('Raw index data:', indexData);
+        // Return empty array if parsing fails
+        return [];
+      }
+    }
+    
     const orderHashes = index.slice(0, limit);
     
     // Fetch each order
@@ -128,18 +148,24 @@ async function getOrder(orderHash: string): Promise<any | null> {
 
 async function upsertOrder(order: any): Promise<void> {
   try {
-    // Store the order with 7 day TTL
-    await redis.set(
-      `${ORDER_KEY_PREFIX}:${order.orderHash}`,
-      JSON.stringify(order),
-      { ex: 60 * 60 * 24 * 7 }
-    );
+    // Filter out undefined/null values for Redis
+    const cleanOrder: any = {};
+    for (const [key, value] of Object.entries(order)) {
+      if (value !== undefined && value !== null) {
+        cleanOrder[key] = value;
+      }
+    }
+    
+    // Store the order as a hash with 7 day TTL
+    await redis.hset(`${ORDER_KEY_PREFIX}:${order.orderHash}`, cleanOrder);
+    await redis.expire(`${ORDER_KEY_PREFIX}:${order.orderHash}`, 60 * 60 * 24 * 7);
 
     // Update the index
-    let index = await redis.get<string[]>(ORDER_INDEX_KEY) || [];
+    const indexData = await redis.get(ORDER_INDEX_KEY);
+    let index = indexData ? JSON.parse(indexData as string) : [];
     
     // Remove if already exists and add to front
-    index = index.filter(h => h !== order.orderHash);
+    index = index.filter((h: string) => h !== order.orderHash);
     index.unshift(order.orderHash);
     
     // Keep only recent orders
