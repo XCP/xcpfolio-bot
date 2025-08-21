@@ -1,7 +1,12 @@
 {
+  "outputDirectory": "public",
+  "buildCommand": "npm run build && mkdir -p public",
   "functions": {
     "api/cron.js": {
       "maxDuration": 60
+    },
+    "api/health.js": {
+      "maxDuration": 10
     }
   },
   "crons": [
