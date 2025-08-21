@@ -8,7 +8,7 @@
     "api/health.js": {
       "maxDuration": 10
     },
-    "api/orders.js": {
+    "api/orders.ts": {
       "maxDuration": 10
     }
   },
