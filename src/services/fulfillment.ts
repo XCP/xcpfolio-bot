@@ -321,7 +321,50 @@ export class FulfillmentProcessor {
     // Get asset name from longname or fallback
     const xcpfolioAsset = order.give_asset_info?.asset_longname || order.give_asset;
     const assetName = xcpfolioAsset.replace(ASSET_CONFIG.XCPFOLIO_PREFIX, '');
-    const buyerAddress = order.source;
+    
+    // For filled orders, we need to find the buyer from order matches
+    // The order.source is us (the seller), not the buyer
+    let buyerAddress: string;
+    
+    try {
+      const matchesResponse = await this.counterparty.getOrderMatches(order.tx_hash);
+      const matches = matchesResponse.result || matchesResponse;
+      
+      if (!matches || matches.length === 0) {
+        throw new Error('No order matches found for filled order');
+      }
+      
+      // In an order match:
+      // - tx0_address is the original order creator (us, selling XCPFOLIO.ASSET)
+      // - tx1_address is the order filler (buyer, who sent XCP to buy our XCPFOLIO.ASSET)
+      const match = matches[0];
+      
+      // We are tx0_address (original order creator)
+      // The buyer is tx1_address (order filler)
+      if (match.tx0_address === this.config.xcpfolioAddress) {
+        buyerAddress = match.tx1_address;
+      } else if (match.tx1_address === this.config.xcpfolioAddress) {
+        // Shouldn't happen for our sell orders, but handle just in case
+        buyerAddress = match.tx0_address;
+      } else {
+        throw new Error(`Order match doesn't involve our address: tx0=${match.tx0_address}, tx1=${match.tx1_address}`);
+      }
+      
+      if (!buyerAddress) {
+        throw new Error('Could not determine buyer address from order match');
+      }
+    } catch (error) {
+      console.error('Failed to get buyer address from order match:', error);
+      // This shouldn't happen for filled orders, but if it does, we can't proceed
+      return {
+        orderHash: order.tx_hash,
+        asset: assetName,
+        buyer: 'unknown',
+        success: false,
+        error: `Failed to determine buyer: ${error instanceof Error ? error.message : String(error)}`,
+        stage: 'validation'
+      };
+    }
 
     console.log(`Asset: ${assetName} -> Buyer: ${buyerAddress}`);
 

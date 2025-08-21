@@ -142,6 +142,18 @@ export class CounterpartyService {
   }
 
   /**
+   * Get order matches for a specific order
+   */
+  async getOrderMatches(orderHash: string): Promise<any[]> {
+    const params = new URLSearchParams({
+      verbose: 'true',
+      show_unconfirmed: 'true'
+    });
+    
+    return this.request<any[]>(`/orders/${orderHash}/matches?${params}`);
+  }
+
+  /**
    * Get all filled XCPFOLIO orders
    */
   async getFilledXCPFOLIOOrders(address: string): Promise<Order[]> {
@@ -215,7 +227,6 @@ export class CounterpartyService {
     validate: boolean = true  // Set to false for RBF transactions
   ): Promise<string> {
     const params: any = {
-      source,
       asset,
       quantity: 0, // 0 for transfer
       transfer_destination: destination,
@@ -231,8 +242,9 @@ export class CounterpartyService {
       params.inputs_set = utxos.map(u => `${u.txid}:${u.vout}`).join(',');
     }
 
+    // In v2 API, compose endpoints are under /v2/addresses/{address}/compose/
     const response = await this.request<ComposeResponse>(
-      '/compose/issuance',
+      `/addresses/${source}/compose/issuance`,
       'POST',
       params
     );
@@ -244,7 +256,9 @@ export class CounterpartyService {
    * Compose an issuance with full parameters
    */
   async composeIssuance(params: ComposeIssuanceParams): Promise<ComposeResponse> {
-    return this.request<ComposeResponse>('/compose/issuance', 'POST', params);
+    // Extract source from params for v2 API path
+    const { source, ...restParams } = params;
+    return this.request<ComposeResponse>(`/addresses/${source}/compose/issuance`, 'POST', restParams);
   }
 
   /**

@@ -26,6 +26,7 @@ const processor = new FulfillmentProcessor({
   stuckTxThreshold: process.env.STUCK_TX_THRESHOLD ? parseInt(process.env.STUCK_TX_THRESHOLD) : 3,
   maxTotalFeeSats: process.env.MAX_TOTAL_FEE_SATS ? parseInt(process.env.MAX_TOTAL_FEE_SATS) : 10000,
   maxFeeRateForNewTx: process.env.MAX_FEE_RATE_FOR_NEW_TX ? parseInt(process.env.MAX_FEE_RATE_FOR_NEW_TX) : 100,
+  orderHistoryPath: process.env.VERCEL ? '/tmp/.order-history.json' : '.order-history.json',
 });
 
 // Statistics
