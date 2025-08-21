@@ -37,7 +37,7 @@ async function checkOrders() {
 
     // Get all orders
     console.log('Fetching orders...');
-    const allOrders = await counterparty.getOrdersByAddress(xcpfolioAddress, 'all', true);
+    const allOrders = await counterparty.getOrdersByAddress(xcpfolioAddress, 'all', 100, 0);
     console.log(`Total Orders: ${allOrders.length}`);
     
     // Get filled XCPFOLIO orders
@@ -98,7 +98,7 @@ async function checkOrders() {
     // Get fee recommendation
     console.log();
     console.log('Current Fee Rates (sat/vB):');
-    const fees = await bitcoin.getFeeRecommendation();
+    const fees = await bitcoin.getFeeRates();
     console.log(`  Next Block: ${fees.fastestFee}`);
     console.log(`  30 Minutes: ${fees.halfHourFee}`);
     console.log(`  1 Hour: ${fees.hourFee}`);

@@ -18,6 +18,18 @@ export interface Order {
   status: string;
   confirmed: boolean;
   block_time?: number;
+  give_asset_info?: {
+    asset_longname: string | null;  // The actual subasset name
+    asset: string;
+    divisible: boolean;
+    description: string;
+  };
+  get_asset_info?: {
+    asset_longname: string | null;
+    asset: string;
+    divisible: boolean;
+    description: string;
+  };
 }
 
 export interface Issuance {

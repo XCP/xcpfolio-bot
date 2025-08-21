@@ -75,6 +75,11 @@ export class StateManager {
     this.saveState();
   }
 
+  unmarkOrderProcessed(orderHash: string): void {
+    this.state.processedOrders.delete(orderHash);
+    this.saveState();
+  }
+
   shouldCheckForNewOrders(currentBlock: number): boolean {
     // Check if we have a new block
     return currentBlock > this.state.lastBlock;
