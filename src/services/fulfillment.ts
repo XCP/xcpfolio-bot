@@ -327,8 +327,7 @@ export class FulfillmentProcessor {
     let buyerAddress: string;
     
     try {
-      const matchesResponse = await this.counterparty.getOrderMatches(order.tx_hash);
-      const matches = matchesResponse.result || matchesResponse;
+      const matches = await this.counterparty.getOrderMatches(order.tx_hash);
       
       if (!matches || matches.length === 0) {
         throw new Error('No order matches found for filled order');
