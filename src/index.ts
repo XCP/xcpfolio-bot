@@ -159,7 +159,7 @@ async function startHealthCheck() {
   
   http.createServer(async (req: any, res: any) => {
     if (req.url === '/health' || req.url === '/status') {
-      const state = processor.getState();
+      const state = await processor.getState();
       const uptime = Math.floor((Date.now() - stats.startTime.getTime()) / 1000);
       
       const status = {
@@ -170,7 +170,7 @@ async function startHealthCheck() {
         mempool: state.mempool,
         failures: state.failures,
         lastBlock: state.lastBlock,
-        processedOrders: state.processedOrders.size,
+        processedOrders: state.processedOrders.length,
       };
       
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -214,7 +214,7 @@ async function main() {
   const checkInterval = process.env.CHECK_INTERVAL || '* * * * *';
   cron.schedule(checkInterval, async () => {
     // Only run if not already processing
-    const state = processor.getState();
+    const state = await processor.getState();
     if (state.isProcessing) {
       console.log('Previous run still active, skipping...');
       return;
@@ -235,7 +235,7 @@ process.on('SIGINT', async () => {
   const maxWait = 30000; // 30 seconds
   const startWait = Date.now();
   
-  while (processor.getState().isProcessing && (Date.now() - startWait) < maxWait) {
+  while ((await processor.getState()).isProcessing && (Date.now() - startWait) < maxWait) {
     console.log('Waiting for current order to complete...');
     await new Promise(resolve => setTimeout(resolve, 1000));
   }
@@ -247,7 +247,7 @@ process.on('SIGINT', async () => {
   console.log(`- Successful: ${stats.successful}`);
   console.log(`- Failed: ${stats.failed}`);
   
-  const state = processor.getState();
+  const state = await processor.getState();
   console.log(`- Active Txs: ${state.mempool.activeTransactions}`);
   console.log(`- Pre-broadcast Failures: ${state.failures.preBroadcast}`);
   

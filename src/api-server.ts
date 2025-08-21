@@ -28,10 +28,10 @@ export function startApiServer(orderHistory: OrderHistoryService) {
   });
 
   // Get recent orders
-  app.get('/api/orders', (req, res) => {
+  app.get('/api/orders', async (req, res) => {
     try {
       const limit = parseInt(req.query.limit as string) || 50;
-      const orders = orderHistory.getRecentOrders(limit);
+      const orders = await orderHistory.getRecentOrders(limit);
       
       // Transform for frontend display
       const formattedOrders = orders.map(order => ({
@@ -65,9 +65,9 @@ export function startApiServer(orderHistory: OrderHistoryService) {
   });
 
   // Get specific order by hash
-  app.get('/api/orders/:hash', (req, res) => {
+  app.get('/api/orders/:hash', async (req, res) => {
     try {
-      const order = orderHistory.getOrder(req.params.hash);
+      const order = await orderHistory.getOrder(req.params.hash);
       
       if (!order) {
         return res.status(404).json({
@@ -103,9 +103,10 @@ export function startApiServer(orderHistory: OrderHistoryService) {
   });
 
   // Get orders by buyer address
-  app.get('/api/orders/buyer/:address', (req, res) => {
+  app.get('/api/orders/buyer/:address', async (req, res) => {
     try {
-      const orders = orderHistory.getOrdersByBuyer(req.params.address);
+      const allOrders = await orderHistory.getOrders();
+      const orders = allOrders.filter(o => o.buyer === req.params.address);
       
       const formattedOrders = orders.map(order => ({
         orderHash: order.orderHash,
@@ -135,9 +136,21 @@ export function startApiServer(orderHistory: OrderHistoryService) {
   });
 
   // Get statistics
-  app.get('/api/stats', (req, res) => {
+  app.get('/api/stats', async (req, res) => {
     try {
-      const stats = orderHistory.getStatistics();
+      const summary = await orderHistory.getStatusSummary();
+      const orders = await orderHistory.getOrders();
+      
+      // Calculate average delivery time
+      const deliveredOrders = orders.filter(o => o.deliveredAt && o.purchasedAt);
+      const averageDeliveryTime = deliveredOrders.length > 0
+        ? Math.floor(deliveredOrders.reduce((sum, o) => sum + (o.deliveredAt! - o.purchasedAt), 0) / deliveredOrders.length / 1000)
+        : 0;
+      
+      const stats = {
+        ...summary,
+        averageDeliveryTime
+      };
       
       res.json({
         success: true,

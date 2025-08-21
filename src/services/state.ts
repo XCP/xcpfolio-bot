@@ -1,135 +1,187 @@
-import { readFileSync, writeFileSync, existsSync } from 'fs';
-import { join } from 'path';
+import { Redis } from '@upstash/redis';
 
 export interface FulfillmentState {
   lastBlock: number;
   lastOrderHash: string | null;
   lastChecked: number;
-  processedOrders: Set<string>;  // Only confirmed transfers
+  processedOrders: string[];  // Array for Redis serialization (not Set)
+  failedOrders: string[];  // Orders that permanently failed after all retries
   lastCleanup: number;  // Last block we cleaned up old orders
 }
 
 export class StateManager {
-  private state: FulfillmentState;
-  private statePath: string;
+  private redis: Redis;
+  private stateKey: string;
+  private state: FulfillmentState | null = null;
+  private cacheExpiry = 5000; // 5 second cache to reduce Redis calls
+  private lastCacheTime = 0;
 
   constructor(statePath?: string) {
-    this.statePath = statePath || join(process.cwd(), '.fulfillment-state.json');
-    this.state = this.loadState();
+    // statePath parameter kept for compatibility but ignored
+    // Always use Redis/KV for state management
+    if (!process.env.KV_REST_API_URL || !process.env.KV_REST_API_TOKEN) {
+      throw new Error('Redis/KV credentials required: Set KV_REST_API_URL and KV_REST_API_TOKEN');
+    }
+
+    this.redis = new Redis({
+      url: process.env.KV_REST_API_URL,
+      token: process.env.KV_REST_API_TOKEN,
+    });
+
+    this.stateKey = 'fulfillment-state';
+    console.log('StateManager: Using Redis/KV for state persistence');
   }
 
-  private loadState(): FulfillmentState {
-    if (existsSync(this.statePath)) {
-      try {
-        const data = JSON.parse(readFileSync(this.statePath, 'utf-8'));
-        return {
-          ...data,
-          processedOrders: new Set(data.processedOrders || []),
-          lastCleanup: data.lastCleanup || 0,
-        };
-      } catch (error) {
-        console.error('Error loading state:', error);
+  private async loadState(): Promise<FulfillmentState> {
+    // Use local cache if fresh
+    if (this.state && Date.now() - this.lastCacheTime < this.cacheExpiry) {
+      return this.state;
+    }
+
+    try {
+      const state = await this.redis.get<FulfillmentState>(this.stateKey);
+      
+      if (state) {
+        this.state = state;
+        this.lastCacheTime = Date.now();
+        return state;
       }
+    } catch (error) {
+      console.error('Error loading state from Redis:', error);
     }
 
     // Default state
-    return {
+    const defaultState: FulfillmentState = {
       lastBlock: 0,
       lastOrderHash: null,
       lastChecked: 0,
-      processedOrders: new Set(),
+      processedOrders: [],
+      failedOrders: [],
       lastCleanup: 0,
     };
+
+    this.state = defaultState;
+    this.lastCacheTime = Date.now();
+    return defaultState;
   }
 
-  private saveState(): void {
-    const stateToSave = {
-      ...this.state,
-      processedOrders: Array.from(this.state.processedOrders),
-    };
-    writeFileSync(this.statePath, JSON.stringify(stateToSave, null, 2));
-  }
+  private async saveState(): Promise<void> {
+    if (!this.state) return;
 
-  getLastBlock(): number {
-    return this.state.lastBlock;
-  }
-
-  setLastBlock(block: number): void {
-    this.state.lastBlock = block;
-    this.saveState();
-  }
-
-  getLastOrderHash(): string | null {
-    return this.state.lastOrderHash;
-  }
-
-  setLastOrderHash(hash: string): void {
-    this.state.lastOrderHash = hash;
-    this.saveState();
-  }
-
-  isOrderProcessed(orderHash: string): boolean {
-    return this.state.processedOrders.has(orderHash);
-  }
-
-  markOrderProcessed(orderHash: string): void {
-    this.state.processedOrders.add(orderHash);
-    this.state.lastChecked = Date.now();
-    this.saveState();
-  }
-
-  unmarkOrderProcessed(orderHash: string): void {
-    this.state.processedOrders.delete(orderHash);
-    this.saveState();
-  }
-
-  shouldCheckForNewOrders(currentBlock: number): boolean {
-    // Check if we have a new block
-    return currentBlock > this.state.lastBlock;
-  }
-
-  getState(): FulfillmentState {
-    return { ...this.state, processedOrders: new Set(this.state.processedOrders) };
-  }
-
-  reset(): void {
-    this.state = {
-      lastBlock: 0,
-      lastOrderHash: null,
-      lastChecked: 0,
-      processedOrders: new Set(),
-      lastCleanup: 0,
-    };
-    this.saveState();
-  }
-
-  getLastCleanup(): number {
-    return this.state.lastCleanup || 0;
-  }
-
-  setLastCleanup(block: number): void {
-    this.state.lastCleanup = block;
-    this.saveState();
-  }
-
-  /**
-   * Remove old orders from processedOrders set
-   * Returns the number of orders removed
-   */
-  cleanupOldOrders(orderHashes: Set<string>, beforeBlock: number): number {
-    const initialSize = this.state.processedOrders.size;
-    
-    // Only keep orders that are NOT in the old orders set
-    const newProcessedOrders = new Set<string>();
-    for (const hash of this.state.processedOrders) {
-      if (!orderHashes.has(hash)) {
-        newProcessedOrders.add(hash);
-      }
+    try {
+      await this.redis.set(this.stateKey, JSON.stringify(this.state), {
+        ex: 60 * 60 * 24 * 30 // 30 day TTL
+      });
+    } catch (error) {
+      console.error('Error saving state to Redis:', error);
+      throw error; // Re-throw to ensure we know about save failures
     }
-    
-    this.state.processedOrders = newProcessedOrders;
-    this.saveState();
-    
-    return initialSize - newProcessedOrders.size;
   }
-}
+
+  async getLastBlock(): Promise<number> {
+    const state = await this.loadState();
+    return state.lastBlock;
+  }
+
+  async setLastBlock(block: number): Promise<void> {
+    const state = await this.loadState();
+    state.lastBlock = block;
+    state.lastChecked = Date.now();
+    this.state = state;
+    await this.saveState();
+  }
+
+  async getLastOrderHash(): Promise<string | null> {
+    const state = await this.loadState();
+    return state.lastOrderHash;
+  }
+
+  async setLastOrderHash(hash: string | null): Promise<void> {
+    const state = await this.loadState();
+    state.lastOrderHash = hash;
+    this.state = state;
+    await this.saveState();
+  }
+
+  async isOrderProcessed(orderHash: string): Promise<boolean> {
+    const state = await this.loadState();
+    return state.processedOrders.includes(orderHash);
+  }
+
+  async markOrderProcessed(orderHash: string): Promise<void> {
+    const state = await this.loadState();
+    if (!state.processedOrders.includes(orderHash)) {
+      state.processedOrders.push(orderHash);
+      // Keep only last 1000 orders to prevent unbounded growth
+      if (state.processedOrders.length > 1000) {
+        state.processedOrders = state.processedOrders.slice(-1000);
+      }
+      this.state = state;
+      await this.saveState();
+    }
+  }
+
+  async getProcessedOrders(): Promise<Set<string>> {
+    const state = await this.loadState();
+    return new Set(state.processedOrders);
+  }
+
+  async getLastCleanup(): Promise<number> {
+    const state = await this.loadState();
+    return state.lastCleanup;
+  }
+
+  async setLastCleanup(block: number): Promise<void> {
+    const state = await this.loadState();
+    state.lastCleanup = block;
+    this.state = state;
+    await this.saveState();
+  }
+
+  async getState(): Promise<FulfillmentState> {
+    return await this.loadState();
+  }
+
+  async clearOldOrders(keepCount: number = 100): Promise<void> {
+    const state = await this.loadState();
+    if (state.processedOrders.length > keepCount) {
+      state.processedOrders = state.processedOrders.slice(-keepCount);
+      this.state = state;
+      await this.saveState();
+    }
+  }
+
+  async markOrderFailed(orderHash: string): Promise<void> {
+    const state = await this.loadState();
+    if (!state.failedOrders) {
+      state.failedOrders = [];
+    }
+    if (!state.failedOrders.includes(orderHash)) {
+      state.failedOrders.push(orderHash);
+      // Keep only last 500 failed orders
+      if (state.failedOrders.length > 500) {
+        state.failedOrders = state.failedOrders.slice(-500);
+      }
+      this.state = state;
+      await this.saveState();
+    }
+  }
+
+  async isOrderFailed(orderHash: string): Promise<boolean> {
+    const state = await this.loadState();
+    return state.failedOrders?.includes(orderHash) || false;
+  }
+
+  async getFailedOrders(): Promise<string[]> {
+    const state = await this.loadState();
+    return state.failedOrders || [];
+  }
+
+  async removeFromFailed(orderHash: string): Promise<void> {
+    const state = await this.loadState();
+    if (state.failedOrders) {
+      state.failedOrders = state.failedOrders.filter(h => h !== orderHash);
+      this.state = state;
+      await this.saveState();
+    }
+  }

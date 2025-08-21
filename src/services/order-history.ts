@@ -1,23 +1,9 @@
 /**
  * Order history tracking for status page
- * Uses Vercel KV when available, falls back to JSON for local dev
+ * Uses Vercel KV (Redis) for persistence
  */
 
-import { readFileSync, writeFileSync, existsSync } from 'fs';
-import { join } from 'path';
 import { Redis } from '@upstash/redis';
-
-// Initialize Redis if credentials available
-let redis: Redis | null = null;
-if (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) {
-  redis = new Redis({
-    url: process.env.KV_REST_API_URL,
-    token: process.env.KV_REST_API_TOKEN,
-  });
-  console.log('OrderHistory: Using Vercel KV for persistence');
-} else {
-  console.log('OrderHistory: Using local JSON file');
-}
 
 export interface OrderStatus {
   orderHash: string;
@@ -26,7 +12,7 @@ export interface OrderStatus {
   price: number; // In XCP
   buyer: string;
   seller: string;
-  status: 'unconfirmed' | 'listing' | 'pending' | 'processing' | 'broadcasting' | 'confirmed' | 'failed';
+  status: 'unconfirmed' | 'listing' | 'pending' | 'processing' | 'broadcasting' | 'confirmed' | 'failed' | 'permanently_failed';
   stage?: 'mempool' | 'listing' | 'validation' | 'compose' | 'sign' | 'broadcast' | 'confirmed';
   confirmations?: number; // 0 for mempool, 1+ for confirmed
   orderType?: 'open' | 'filled'; // To distinguish between listing and sale
@@ -40,25 +26,57 @@ export interface OrderStatus {
 }
 
 export class OrderHistoryService {
+  private redis: Redis;
   private orders: Map<string, OrderStatus>;
-  private historyPath: string;
   private maxOrders: number;
+  private cacheExpiry = 5000; // 5 second cache
+  private lastCacheTime = 0;
 
   constructor(historyPath?: string, maxOrders = 100) {
-    this.historyPath = historyPath || join(process.cwd(), '.order-history.json');
+    // historyPath parameter kept for compatibility but ignored
+    // Always use Redis/KV for order history
+    if (!process.env.KV_REST_API_URL || !process.env.KV_REST_API_TOKEN) {
+      throw new Error('Redis/KV credentials required: Set KV_REST_API_URL and KV_REST_API_TOKEN');
+    }
+
+    this.redis = new Redis({
+      url: process.env.KV_REST_API_URL,
+      token: process.env.KV_REST_API_TOKEN,
+    });
+
     this.maxOrders = maxOrders;
-    this.orders = this.loadHistory();
+    this.orders = new Map();
+    console.log('OrderHistory: Using Redis/KV for persistence');
   }
 
-  private loadHistory(): Map<string, OrderStatus> {
-    if (existsSync(this.historyPath)) {
-      try {
-        const data = JSON.parse(readFileSync(this.historyPath, 'utf-8'));
-        return new Map(data.orders || []);
-      } catch (error) {
-        console.error('Error loading order history:', error);
-      }
+  private async loadHistory(): Promise<Map<string, OrderStatus>> {
+    // Use cache if fresh
+    if (this.orders.size > 0 && Date.now() - this.lastCacheTime < this.cacheExpiry) {
+      return this.orders;
     }
+
+    try {
+      // Get order index
+      const indexData = await this.redis.get<string[]>('order-index');
+      if (indexData && Array.isArray(indexData)) {
+        const orders = new Map<string, OrderStatus>();
+        
+        // Load each order
+        for (const hash of indexData) {
+          const order = await this.redis.hgetall(`order:${hash}`);
+          if (order) {
+            orders.set(hash, order as unknown as OrderStatus);
+          }
+        }
+        
+        this.orders = orders;
+        this.lastCacheTime = Date.now();
+        return orders;
+      }
+    } catch (error) {
+      console.error('Error loading order history from Redis:', error);
+    }
+
     return new Map();
   }
 
@@ -70,53 +88,45 @@ export class OrderHistoryService {
         .sort((a, b) => b[1].lastUpdated - a[1].lastUpdated)
         .slice(0, this.maxOrders);
       
-      // Save to Vercel KV if available
-      if (redis) {
-        // Save each order individually
-        for (const [hash, order] of recentOrders) {
-          await redis.hset(`order:${hash}`, order as any);
-          await redis.expire(`order:${hash}`, 60 * 60 * 24 * 7); // 7 day TTL
-        }
-        
-        // Update index
-        const orderHashes = recentOrders.map(([hash]) => hash);
-        await redis.set('order-index', JSON.stringify(orderHashes), {
-          ex: 60 * 60 * 24 * 7
-        });
-      } else {
-        // Fall back to JSON file
-        const data = {
-          version: 1,
-          lastUpdated: Date.now(),
-          orders: recentOrders
-        };
-        
-        writeFileSync(this.historyPath, JSON.stringify(data, null, 2));
+      // Save each order individually
+      for (const [hash, order] of recentOrders) {
+        await this.redis.hset(`order:${hash}`, order as any);
+        await this.redis.expire(`order:${hash}`, 60 * 60 * 24 * 7); // 7 day TTL
       }
+      
+      // Update index
+      const orderHashes = recentOrders.map(([hash]) => hash);
+      await this.redis.set('order-index', JSON.stringify(orderHashes), {
+        ex: 60 * 60 * 24 * 7
+      });
     } catch (error) {
-      console.error('Error saving order history:', error);
+      console.error('Error saving order history to Redis:', error);
+      throw error; // Re-throw to ensure we know about save failures
     }
   }
 
   /**
    * Add or update an order in the history
    */
-  upsertOrder(order: OrderStatus): void {
+  async upsertOrder(order: OrderStatus): Promise<void> {
     order.lastUpdated = Date.now();
     this.orders.set(order.orderHash, order);
-    this.saveHistory();
+    await this.saveHistory();
   }
 
   /**
    * Update order status
    */
-  updateOrderStatus(
+  async updateOrderStatus(
     orderHash: string, 
     status: OrderStatus['status'], 
     stage?: OrderStatus['stage'],
     txid?: string,
     error?: string
-  ): void {
+  ): Promise<void> {
+    // Load latest state from Redis
+    await this.loadHistory();
+    
     const order = this.orders.get(orderHash);
     if (order) {
       order.status = status;
@@ -135,81 +145,129 @@ export class OrderHistoryService {
         order.confirmedAt = Date.now();
       }
       
-      this.saveHistory();
+      await this.saveHistory();
     }
   }
 
   /**
-   * Get recent orders for display
+   * Update order confirmations
    */
-  getRecentOrders(limit = 50): OrderStatus[] {
-    const orders = Array.from(this.orders.values());
-    return orders
-      .sort((a, b) => b.purchasedAt - a.purchasedAt)
-      .slice(0, limit);
+  async updateOrderConfirmations(orderHash: string, confirmations: number): Promise<void> {
+    await this.loadHistory();
+    
+    const order = this.orders.get(orderHash);
+    if (order) {
+      order.confirmations = confirmations;
+      order.lastUpdated = Date.now();
+      
+      // Mark as confirmed if has confirmations
+      if (confirmations > 0 && order.status !== 'confirmed') {
+        order.status = 'confirmed';
+        order.stage = 'confirmed';
+        if (!order.confirmedAt) {
+          order.confirmedAt = Date.now();
+        }
+      }
+      
+      await this.saveHistory();
+    }
   }
 
   /**
    * Get order by hash
    */
-  getOrder(orderHash: string): OrderStatus | undefined {
+  async getOrder(orderHash: string): Promise<OrderStatus | undefined> {
+    await this.loadHistory();
     return this.orders.get(orderHash);
   }
 
   /**
-   * Get orders by buyer address
+   * Get all orders
    */
-  getOrdersByBuyer(buyerAddress: string): OrderStatus[] {
+  async getOrders(): Promise<OrderStatus[]> {
+    await this.loadHistory();
     return Array.from(this.orders.values())
-      .filter(order => order.buyer.toLowerCase() === buyerAddress.toLowerCase())
-      .sort((a, b) => b.purchasedAt - a.purchasedAt);
+      .sort((a, b) => b.lastUpdated - a.lastUpdated);
   }
 
   /**
-   * Clean up old orders beyond the limit
+   * Get recent orders
    */
-  cleanup(): void {
-    if (this.orders.size > this.maxOrders * 1.5) {
-      const ordersArray = Array.from(this.orders.entries());
-      const recentOrders = ordersArray
-        .sort((a, b) => b[1].lastUpdated - a[1].lastUpdated)
-        .slice(0, this.maxOrders);
-      
-      this.orders = new Map(recentOrders);
-      this.saveHistory();
+  async getRecentOrders(limit: number = 50): Promise<OrderStatus[]> {
+    const orders = await this.getOrders();
+    return orders.slice(0, limit);
+  }
+
+  /**
+   * Get pending orders (not confirmed)
+   */
+  async getPendingOrders(): Promise<OrderStatus[]> {
+    const orders = await this.getOrders();
+    return orders.filter(o => 
+      o.status !== 'confirmed' && 
+      o.status !== 'failed'
+    );
+  }
+
+  /**
+   * Get confirmed orders
+   */
+  async getConfirmedOrders(): Promise<OrderStatus[]> {
+    const orders = await this.getOrders();
+    return orders.filter(o => o.status === 'confirmed');
+  }
+
+  /**
+   * Get failed orders
+   */
+  async getFailedOrders(): Promise<OrderStatus[]> {
+    const orders = await this.getOrders();
+    return orders.filter(o => o.status === 'failed');
+  }
+
+  /**
+   * Clean up old orders
+   */
+  async cleanupOldOrders(maxAge: number = 7 * 24 * 60 * 60 * 1000): Promise<void> {
+    await this.loadHistory();
+    
+    const now = Date.now();
+    const oldOrders: string[] = [];
+    
+    for (const [hash, order] of this.orders.entries()) {
+      if (now - order.lastUpdated > maxAge) {
+        oldOrders.push(hash);
+      }
+    }
+    
+    // Remove old orders
+    for (const hash of oldOrders) {
+      this.orders.delete(hash);
+      await this.redis.del(`order:${hash}`);
+    }
+    
+    if (oldOrders.length > 0) {
+      await this.saveHistory();
+      console.log(`Cleaned up ${oldOrders.length} old orders`);
     }
   }
 
   /**
-   * Get statistics for monitoring
+   * Get status summary
    */
-  getStatistics(): {
+  async getStatusSummary(): Promise<{
     total: number;
     pending: number;
-    processing: number;
     confirmed: number;
     failed: number;
-    averageDeliveryTime: number;
-  } {
-    const orders = Array.from(this.orders.values());
-    const delivered = orders.filter(o => o.deliveredAt && o.purchasedAt);
+  }> {
+    const orders = await this.getOrders();
     
-    const stats = {
+    return {
       total: orders.length,
-      pending: orders.filter(o => o.status === 'pending').length,
-      processing: orders.filter(o => o.status === 'processing').length,
+      pending: orders.filter(o => o.status !== 'confirmed' && o.status !== 'failed').length,
       confirmed: orders.filter(o => o.status === 'confirmed').length,
-      failed: orders.filter(o => o.status === 'failed').length,
-      averageDeliveryTime: 0
+      failed: orders.filter(o => o.status === 'failed').length
     };
-
-    if (delivered.length > 0) {
-      const totalTime = delivered.reduce((sum, o) => 
-        sum + ((o.deliveredAt || 0) - o.purchasedAt), 0
-      );
-      stats.averageDeliveryTime = Math.round(totalTime / delivered.length / 1000); // in seconds
-    }
-
-    return stats;
   }
 }
