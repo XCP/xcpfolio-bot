@@ -330,6 +330,34 @@ export class CounterpartyService {
   }
 
   /**
+   * Get unconfirmed buy orders for XCPFOLIO assets from mempool
+   * These are orders where someone is trying to buy an XCPFOLIO asset with XCP
+   */
+  async getMempoolBuyOrders(): Promise<any[]> {
+    try {
+      const params = new URLSearchParams({
+        verbose: 'true'
+      });
+      
+      const events = await this.request<any[]>(`/mempool/events/OPEN_ORDER?${params}`);
+      
+      // Filter for orders where someone is buying (getting) XCPFOLIO.* assets
+      return events.filter(event => {
+        const assetLongname = event.params?.get_asset_info?.asset_longname;
+        const giveAsset = event.params?.give_asset;
+        
+        // Check if they're getting an XCPFOLIO asset and giving XCP
+        return assetLongname && 
+               assetLongname.startsWith(ASSET_CONFIG.XCPFOLIO_PREFIX) &&
+               giveAsset === 'XCP';
+      });
+    } catch (error) {
+      console.error('Error fetching mempool buy orders:', error);
+      return [];
+    }
+  }
+
+  /**
    * Get pending orders that might need fulfillment
    */
   async getPendingFulfillments(

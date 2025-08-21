@@ -205,6 +205,9 @@ export class FulfillmentProcessor {
       // 4. Get current block height
       const currentBlock = await this.bitcoin.getCurrentBlockHeight();
       
+      // 4a. Track unconfirmed open orders (new listings)
+      await this.trackMempoolOpenOrders();
+      
       // 5. Get filled orders from Counterparty
       console.log('Fetching filled orders...');
       const orders = await this.counterparty.getFilledXCPFOLIOOrders(this.config.xcpfolioAddress);
@@ -856,6 +859,60 @@ export class FulfillmentProcessor {
       this.state.unmarkOrderProcessed(tx.orderHash);
       
       return null;
+    }
+  }
+
+  /**
+   * Track unconfirmed buy orders from mempool
+   * 
+   * Fetches OPEN_ORDER events where someone is trying to buy XCPFOLIO assets.
+   * This allows buyers to see their order status immediately after placing it.
+   * Note: These orders may not be fulfilled if invalid or if someone else's order confirms first.
+   */
+  private async trackMempoolOpenOrders(): Promise<void> {
+    try {
+      const mempoolBuyOrders = await this.counterparty.getMempoolBuyOrders();
+      
+      for (const event of mempoolBuyOrders) {
+        const orderHash = event.tx_hash;
+        const params = event.params;
+        
+        if (!params) continue;
+        
+        // Extract asset name from longname (what they're trying to buy)
+        const assetLongname = params.get_asset_info?.asset_longname;
+        if (!assetLongname) continue;
+        
+        const assetName = assetLongname.replace('XCPFOLIO.', '');
+        
+        // Calculate price in XCP (what they're paying)
+        const price = params.give_quantity / 100000000; // Convert XCP satoshis to XCP
+        
+        // The source is the buyer (who placed the order)
+        const buyer = params.source;
+        
+        // Track as unconfirmed buy order
+        this.orderHistory.upsertOrder({
+          orderHash,
+          asset: assetName,
+          assetLongname,
+          price,
+          buyer,
+          seller: '', // Not yet matched with a seller
+          status: 'unconfirmed',
+          stage: 'mempool',
+          confirmations: 0,
+          orderType: 'open', // It's an open buy order
+          purchasedAt: Date.now(),
+          lastUpdated: Date.now()
+        });
+      }
+      
+      if (mempoolBuyOrders.length > 0) {
+        console.log(`Tracked ${mempoolBuyOrders.length} unconfirmed buy orders`);
+      }
+    } catch (error) {
+      console.error('Error tracking mempool buy orders:', error);
     }
   }
 

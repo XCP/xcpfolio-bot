@@ -12,8 +12,10 @@ export interface OrderStatus {
   price: number; // In XCP
   buyer: string;
   seller: string;
-  status: 'pending' | 'processing' | 'broadcasting' | 'confirmed' | 'failed';
-  stage?: 'validation' | 'compose' | 'sign' | 'broadcast' | 'mempool' | 'confirmed';
+  status: 'unconfirmed' | 'listing' | 'pending' | 'processing' | 'broadcasting' | 'confirmed' | 'failed';
+  stage?: 'mempool' | 'listing' | 'validation' | 'compose' | 'sign' | 'broadcast' | 'confirmed';
+  confirmations?: number; // 0 for mempool, 1+ for confirmed
+  orderType?: 'open' | 'filled'; // To distinguish between listing and sale
   purchasedAt: number; // Block time or timestamp
   deliveredAt?: number; // When transaction was broadcast
   confirmedAt?: number; // When transaction was confirmed
