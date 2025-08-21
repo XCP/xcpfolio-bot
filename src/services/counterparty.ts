@@ -226,27 +226,27 @@ export class CounterpartyService {
     encoding: 'auto' | 'opreturn' | 'multisig' | 'pubkeyhash' = 'auto',
     validate: boolean = true  // Set to false for RBF transactions
   ): Promise<string> {
-    const params: any = {
+    // Build query parameters for issuance transfer
+    const params = new URLSearchParams({
       asset,
-      quantity: 0, // 0 for transfer
+      quantity: '0', // 0 for ownership transfer
       transfer_destination: destination,
       description: '', // Empty description for transfer
-      fee_rate: feeRate,
+      fee_rate: feeRate.toString(),
       encoding,
-      validate, // Add validate parameter
-      allow_unconfirmed_inputs: true  // Allow chaining transactions
-    };
+      validate: validate.toString(),
+      allow_unconfirmed_inputs: 'true'
+    });
 
     // If UTXOs provided, format them for inputs_set
     if (utxos && utxos.length > 0) {
-      params.inputs_set = utxos.map(u => `${u.txid}:${u.vout}`).join(',');
+      params.append('inputs_set', utxos.map(u => `${u.txid}:${u.vout}`).join(','));
     }
 
-    // In v2 API, compose endpoints are under /v2/addresses/{address}/compose/
+    // In v2 API, compose endpoints use query parameters
     const response = await this.request<ComposeResponse>(
-      `/addresses/${source}/compose/issuance`,
-      'POST',
-      params
+      `/addresses/${source}/compose/issuance?${params.toString()}`,
+      'GET'
     );
 
     return response.rawtransaction;
