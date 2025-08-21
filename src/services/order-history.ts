@@ -173,8 +173,21 @@ export class OrderHistoryService {
   private cleanNullValues(order: OrderStatus): OrderStatus {
     const cleaned: any = {};
     for (const [key, value] of Object.entries(order)) {
-      if (value !== null && value !== undefined) {
-        cleaned[key] = value;
+      if (value !== null && value !== undefined && value !== '') {
+        // Also handle nested objects (like asset_info)
+        if (typeof value === 'object' && !Array.isArray(value)) {
+          const cleanedNested: any = {};
+          for (const [nestedKey, nestedValue] of Object.entries(value)) {
+            if (nestedValue !== null && nestedValue !== undefined && nestedValue !== '') {
+              cleanedNested[nestedKey] = nestedValue;
+            }
+          }
+          if (Object.keys(cleanedNested).length > 0) {
+            cleaned[key] = cleanedNested;
+          }
+        } else {
+          cleaned[key] = value;
+        }
       }
     }
     return cleaned as OrderStatus;

@@ -261,6 +261,11 @@ export class FulfillmentProcessor {
               await this.state.markOrderProcessed(order.tx_hash);
               
               // Update order history to show it's confirmed (for display only)
+              let purchasedAt = Date.now();
+              if (order.block_time && order.block_time > 1000000000) {
+                purchasedAt = order.block_time * 1000;
+              }
+              
               await this.orderHistory.upsertOrder({
                 orderHash: order.tx_hash,
                 asset: assetName,
@@ -270,7 +275,7 @@ export class FulfillmentProcessor {
                 seller: this.config.xcpfolioAddress,
                 status: 'confirmed',
                 stage: 'confirmed',
-                purchasedAt: order.block_time ? order.block_time * 1000 : Date.now(),
+                purchasedAt,
                 purchasedBlock: order.block_index,
                 confirmedAt: Date.now(),
                 lastUpdated: Date.now()
@@ -465,21 +470,34 @@ export class FulfillmentProcessor {
 
     console.log(`Asset: ${assetName} -> Buyer: ${buyerAddress}`);
 
-    // Track order in history
-    const orderStatus: OrderStatus = {
-      orderHash: order.tx_hash,
-      asset: assetName,
-      assetLongname: order.give_asset_info?.asset_longname || undefined,
-      price: order.get_quantity / 100000000, // Convert to XCP
-      buyer: buyerAddress,
-      seller: this.config.xcpfolioAddress,
-      status: 'processing',
-      stage: 'validation',
-      purchasedAt: order.block_time ? order.block_time * 1000 : Date.now(),
-      purchasedBlock: order.block_index || undefined,
-      lastUpdated: Date.now()
-    };
-    await this.orderHistory.upsertOrder(orderStatus);
+    // Track order in history (non-critical, for display only)
+    try {
+      // For filled orders, block_time is when the order was filled
+      // Convert from Unix seconds to milliseconds, and validate it's reasonable
+      let purchasedAt = Date.now(); // Default to now
+      if (order.block_time && order.block_time > 1000000000) {
+        // block_time is in seconds, convert to milliseconds
+        purchasedAt = order.block_time * 1000;
+      }
+      
+      const orderStatus: OrderStatus = {
+        orderHash: order.tx_hash,
+        asset: assetName,
+        assetLongname: order.give_asset_info?.asset_longname || undefined,
+        price: order.get_quantity / 100000000, // Convert to XCP
+        buyer: buyerAddress,
+        seller: this.config.xcpfolioAddress,
+        status: 'processing',
+        stage: 'validation',
+        purchasedAt,
+        purchasedBlock: order.block_index || undefined,
+        lastUpdated: Date.now()
+      };
+      await this.orderHistory.upsertOrder(orderStatus);
+    } catch (error) {
+      console.error('Error saving order to history (non-critical):', error);
+      // Continue processing - order history is just for display
+    }
 
     try {
       // Stage 1: Validation
