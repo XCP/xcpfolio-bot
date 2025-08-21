@@ -97,13 +97,14 @@ export default async function handler(
 async function getRecentOrders(limit: number): Promise<any[]> {
   try {
     // Get the index of recent order hashes
-    const index = await redis.get<string[]>(ORDER_INDEX_KEY) || [];
+    const indexData = await redis.get(ORDER_INDEX_KEY);
+    const index = indexData ? JSON.parse(indexData as string) : [];
     const orderHashes = index.slice(0, limit);
     
     // Fetch each order
     const orders = [];
     for (const hash of orderHashes) {
-      const order = await redis.get(`${ORDER_KEY_PREFIX}:${hash}`);
+      const order = await redis.hgetall(`${ORDER_KEY_PREFIX}:${hash}`);
       if (order) {
         orders.push(order);
       }
@@ -118,7 +119,7 @@ async function getRecentOrders(limit: number): Promise<any[]> {
 
 async function getOrder(orderHash: string): Promise<any | null> {
   try {
-    return await redis.get(`${ORDER_KEY_PREFIX}:${orderHash}`);
+    return await redis.hgetall(`${ORDER_KEY_PREFIX}:${orderHash}`);
   } catch (error) {
     console.error('Error getting order:', error);
     return null;
