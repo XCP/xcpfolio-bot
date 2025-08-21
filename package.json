@@ -37,6 +37,7 @@
     "@types/node-cron": "^3.0.11",
     "@types/secp256k1": "^4.0.6",
     "@types/sinon": "^17.0.4",
+    "@vercel/node": "^3.0.0",
     "jest": "^30.0.5",
     "sinon": "^21.0.0",
     "ts-jest": "^29.4.1",
