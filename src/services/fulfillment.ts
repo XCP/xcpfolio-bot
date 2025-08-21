@@ -475,7 +475,8 @@ export class FulfillmentProcessor {
       seller: this.config.xcpfolioAddress,
       status: 'processing',
       stage: 'validation',
-      purchasedAt: order.block_time || Date.now(),
+      purchasedAt: order.block_time ? order.block_time * 1000 : Date.now(),
+      purchasedBlock: order.block_index || undefined,
       lastUpdated: Date.now()
     };
     await this.orderHistory.upsertOrder(orderStatus);

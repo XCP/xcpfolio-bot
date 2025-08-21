@@ -161,8 +161,23 @@ export class OrderHistoryService {
    */
   async upsertOrder(order: OrderStatus): Promise<void> {
     order.lastUpdated = Date.now();
-    this.orders.set(order.orderHash, order);
+    // Clean nulls before setting in memory map
+    const cleanedOrder = this.cleanNullValues(order);
+    this.orders.set(order.orderHash, cleanedOrder);
     await this.saveHistory();
+  }
+  
+  /**
+   * Helper to clean null/undefined values from order object
+   */
+  private cleanNullValues(order: OrderStatus): OrderStatus {
+    const cleaned: any = {};
+    for (const [key, value] of Object.entries(order)) {
+      if (value !== null && value !== undefined) {
+        cleaned[key] = value;
+      }
+    }
+    return cleaned as OrderStatus;
   }
 
   /**
@@ -200,6 +215,10 @@ export class OrderHistoryService {
           order.deliveredAt = Date.now(); // Delivery complete when confirmed
         }
       }
+      
+      // Clean nulls before saving
+      const cleanedOrder = this.cleanNullValues(order);
+      this.orders.set(orderHash, cleanedOrder);
       
       await this.saveHistory();
     }
