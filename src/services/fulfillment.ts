@@ -192,10 +192,11 @@ export class FulfillmentProcessor {
       
       if (actualMempoolCount >= this.config.maxMempoolTxs!) {
         console.log(`Mempool at capacity, waiting for confirmations`);
-        await NotificationService.warning('Mempool at capacity', {
-          current: actualMempoolCount,
-          limit: this.config.maxMempoolTxs
-        });
+        // Disabled Discord notification for mempool capacity
+        // await NotificationService.warning('Mempool at capacity', {
+        //   current: actualMempoolCount,
+        //   limit: this.config.maxMempoolTxs
+        // });
         return results;
       }
 
