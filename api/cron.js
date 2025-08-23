@@ -1,5 +1,6 @@
 // Vercel serverless function entry point for cron job
 const { FulfillmentProcessor } = require('../dist/services/fulfillment');
+const { ConfirmationMonitor } = require('../dist/services/confirmation-monitor');
 
 module.exports = async (req, res) => {
   console.log('Cron job triggered:', new Date().toISOString());
@@ -21,12 +22,21 @@ module.exports = async (req, res) => {
     };
     
     const processor = new FulfillmentProcessor(config);
-    await processor.process();
+    
+    // Run order processing (this includes tracking mempool orders)
+    const results = await processor.process();
+    
+    // Also check confirmations for pending orders
+    const confirmationMonitor = new ConfirmationMonitor(processor.orderHistory);
+    await confirmationMonitor.checkConfirmations();
+    
+    // Log summary
+    console.log(`Processed ${results.length} orders, checking confirmations for pending orders`);
     
     res.status(200).json({ 
       success: true, 
       timestamp: new Date().toISOString(),
-      message: 'Order processing completed'
+      message: 'Order processing and confirmation check completed'
     });
   } catch (error) {
     console.error('Error in cron job:', error);

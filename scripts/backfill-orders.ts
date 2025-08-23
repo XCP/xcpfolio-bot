@@ -89,24 +89,8 @@ async function backfillOrders() {
             }
           }
         } else {
-          // Check if there's a pending transfer in mempool
-          // Get all mempool events for our address
-          const mempoolEvents = await counterparty.request(
-            `/addresses/mempool?addresses=${xcpfolioAddress}&verbose=true`
-          );
-          
-          // Look for asset issuance transfers (ownership changes)
-          const inMempool = mempoolEvents.find((event: any) => 
-            event.event === 'ASSET_ISSUANCE' &&
-            event.params?.asset === assetName &&
-            event.params?.asset_events === 'transfer' &&
-            event.params?.issuer === buyer  // issuer is the new owner for transfers
-          );
-          
-          if (inMempool) {
-            status = 'confirming';  // In mempool, waiting for confirmation
-            txid = inMempool.tx_hash;
-          }
+          // Skip mempool check in backfill (historical data doesn't need it)
+          // Orders without transfers are just pending
         }
 
         const orderData: any = {

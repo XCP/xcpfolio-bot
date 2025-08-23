@@ -160,9 +160,17 @@ export class OrderHistoryService {
    * Add or update an order in the history
    */
   async upsertOrder(order: OrderStatus): Promise<void> {
+    // Always load latest from Redis first to ensure we have current data
+    await this.loadHistory();
+    
     order.lastUpdated = Date.now();
+    
+    // Get existing order if it exists and merge with new data
+    const existingOrder = this.orders.get(order.orderHash);
+    const mergedOrder = existingOrder ? { ...existingOrder, ...order } : order;
+    
     // Clean nulls before setting in memory map
-    const cleanedOrder = this.cleanNullValues(order);
+    const cleanedOrder = this.cleanNullValues(mergedOrder);
     this.orders.set(order.orderHash, cleanedOrder);
     await this.saveHistory();
   }

@@ -266,6 +266,34 @@ export class FulfillmentProcessor {
                 purchasedAt = order.block_time * 1000;
               }
               
+              // Check if this order already exists (may have been tracked from mempool)
+              const existingOrder = await this.orderHistory.getOrder(order.tx_hash);
+              
+              // Get actual delivery info from blockchain
+              let deliveryTime = Date.now();
+              let deliveryBlock = order.block_index;
+              let transferTxid: string | undefined;
+              
+              try {
+                // Get issuances to find the actual transfer transaction
+                const issuances = await this.counterparty.getAssetIssuances(assetName);
+                const transfer = issuances.find(i => 
+                  i.transfer === true &&
+                  i.source === this.config.xcpfolioAddress &&
+                  i.issuer === buyer
+                );
+                
+                if (transfer) {
+                  transferTxid = transfer.tx_hash;
+                  deliveryBlock = transfer.block_index;
+                  if (transfer.block_time) {
+                    deliveryTime = transfer.block_time * 1000; // Convert to milliseconds
+                  }
+                }
+              } catch (error) {
+                console.error(`Error getting transfer details for ${assetName}:`, error);
+              }
+              
               await this.orderHistory.upsertOrder({
                 orderHash: order.tx_hash,
                 asset: assetName,
@@ -275,9 +303,13 @@ export class FulfillmentProcessor {
                 seller: this.config.xcpfolioAddress,
                 status: 'confirmed',
                 stage: 'confirmed',
-                purchasedAt,
+                purchasedAt: existingOrder?.purchasedAt || purchasedAt, // Keep original purchase time if updating
                 purchasedBlock: order.block_index,
-                confirmedAt: Date.now(),
+                confirmedAt: deliveryTime,
+                confirmedBlock: deliveryBlock,
+                deliveredAt: deliveryTime, // Use actual delivery time from blockchain
+                txid: transferTxid,
+                confirmations: 1, // It's confirmed
                 lastUpdated: Date.now()
               });
               continue;
@@ -472,6 +504,9 @@ export class FulfillmentProcessor {
 
     // Track order in history (non-critical, for display only)
     try {
+      // Check if this order already exists in history (from mempool tracking)
+      const existingOrder = await this.orderHistory.getOrder(order.tx_hash);
+      
       // For filled orders, block_time is when the order was filled
       // Convert from Unix seconds to milliseconds, and validate it's reasonable
       let purchasedAt = Date.now(); // Default to now
@@ -480,6 +515,7 @@ export class FulfillmentProcessor {
         purchasedAt = order.block_time * 1000;
       }
       
+      // If order exists from mempool, update it. Otherwise create new entry.
       const orderStatus: OrderStatus = {
         orderHash: order.tx_hash,
         asset: assetName,
@@ -489,8 +525,9 @@ export class FulfillmentProcessor {
         seller: this.config.xcpfolioAddress,
         status: 'processing',
         stage: 'validation',
-        purchasedAt,
+        purchasedAt: existingOrder?.purchasedAt || purchasedAt, // Keep original purchase time if updating
         purchasedBlock: order.block_index || undefined,
+        confirmations: 1, // It's confirmed if we're processing it
         lastUpdated: Date.now()
       };
       await this.orderHistory.upsertOrder(orderStatus);
