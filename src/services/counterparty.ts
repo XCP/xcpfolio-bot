@@ -154,6 +154,20 @@ export class CounterpartyService {
   }
 
   /**
+   * Get orders by asset (both buy and sell orders for this asset)
+   */
+  async getOrdersByAsset(asset: string, status: string = 'open'): Promise<Order[]> {
+    const params = new URLSearchParams({
+      status,
+      verbose: 'true',
+      show_unconfirmed: 'true',
+      limit: '1000'
+    });
+    
+    return this.request<Order[]>(`/assets/${asset}/orders?${params}`);
+  }
+
+  /**
    * Get all filled XCPFOLIO orders
    */
   async getFilledXCPFOLIOOrders(address: string): Promise<Order[]> {

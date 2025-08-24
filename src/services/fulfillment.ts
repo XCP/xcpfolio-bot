@@ -295,8 +295,12 @@ export class FulfillmentProcessor {
                 console.error(`Error getting transfer details for ${assetName}:`, error);
               }
               
+              // Get buyer's order hash from the match
+              const buyerOrderHash = match.tx1_hash;
+              
               await this.orderHistory.upsertOrder({
-                orderHash: order.tx_hash,
+                orderHash: order.tx_hash,          // Our sell order (primary key)
+                matchHash: buyerOrderHash,          // Buyer's order hash
                 asset: assetName,
                 assetLongname: order.give_asset_info?.asset_longname || undefined,
                 price: order.get_quantity / 100000000,
@@ -309,7 +313,7 @@ export class FulfillmentProcessor {
                 confirmedAt: deliveryTime,
                 confirmedBlock: deliveryBlock,
                 deliveredAt: deliveryTime, // Use actual delivery time from blockchain
-                txid: transferTxid,
+                txid: transferTxid,                // Asset transfer transaction
                 confirmations: 1, // It's confirmed
                 lastUpdated: Date.now()
               });
@@ -505,7 +509,18 @@ export class FulfillmentProcessor {
 
     // Track order in history (non-critical, for display only)
     try {
+      // Get the buyer's order hash from the match
+      const matches = await this.counterparty.getOrderMatches(order.tx_hash);
+      let buyerOrderHash: string | undefined;
+      
+      if (matches && matches.length > 0) {
+        const match = matches[0];
+        // tx1_hash is the buyer's order (they matched our sell order)
+        buyerOrderHash = match.tx1_hash;
+      }
+      
       // Check if this order already exists in history (from mempool tracking)
+      // Use our sell order hash as the primary key
       const existingOrder = await this.orderHistory.getOrder(order.tx_hash);
       
       // For filled orders, block_time is when the order was filled
@@ -518,7 +533,8 @@ export class FulfillmentProcessor {
       
       // If order exists from mempool, update it. Otherwise create new entry.
       const orderStatus: OrderStatus = {
-        orderHash: order.tx_hash,
+        orderHash: order.tx_hash,          // Our sell order (primary key)
+        matchHash: buyerOrderHash,          // Buyer's order hash
         asset: assetName,
         assetLongname: order.give_asset_info?.asset_longname || undefined,
         price: order.get_quantity / 100000000, // Convert to XCP
@@ -1082,22 +1098,22 @@ export class FulfillmentProcessor {
    * Track unconfirmed buy orders from mempool
    * 
    * Fetches OPEN_ORDER events where someone is trying to buy XCPFOLIO assets.
+   * Matches them with our sell orders to properly track order history.
    * This allows buyers to see their order status immediately after placing it.
-   * Note: These orders may not be fulfilled if invalid or if someone else's order confirms first.
    */
   private async trackMempoolOpenOrders(): Promise<void> {
     try {
       const mempoolBuyOrders = await this.counterparty.getMempoolBuyOrders();
       
       for (const event of mempoolBuyOrders) {
-        const orderHash = event.tx_hash;
+        const buyOrderHash = event.tx_hash;
         const params = event.params;
         
         if (!params) continue;
         
         // Extract asset name from longname (what they're trying to buy)
         const assetLongname = params.get_asset_info?.asset_longname;
-        if (!assetLongname) continue;
+        if (!assetLongname || !assetLongname.startsWith('XCPFOLIO.')) continue;
         
         const assetName = assetLongname.replace('XCPFOLIO.', '');
         
@@ -1107,14 +1123,30 @@ export class FulfillmentProcessor {
         // The source is the buyer (who placed the order)
         const buyer = params.source;
         
-        // Track as unconfirmed buy order
-        this.orderHistory.upsertOrder({
-          orderHash,
+        // Get all open orders for this XCPFOLIO asset to find our matching sell order
+        const assetOrders = await this.counterparty.getOrdersByAsset(assetLongname, 'open');
+        
+        // Find our sell order (where we're giving the XCPFOLIO asset)
+        // Need to check give_asset_info.asset_longname for the full name
+        const ourSellOrder = assetOrders.find(order => 
+          order.source === this.config.xcpfolioAddress && 
+          order.give_asset_info?.asset_longname === assetLongname
+        );
+        
+        if (!ourSellOrder) {
+          console.log(`No matching sell order found for buy order ${buyOrderHash} (asset: ${assetLongname})`);
+          continue;
+        }
+        
+        // Track with our sell order as primary key, buy order as matchHash
+        await this.orderHistory.upsertOrder({
+          orderHash: ourSellOrder.tx_hash,  // Our sell order (primary key)
+          matchHash: buyOrderHash,           // Buyer's order
           asset: assetName,
           assetLongname,
           price,
           buyer,
-          seller: '', // Not yet matched with a seller
+          seller: this.config.xcpfolioAddress,
           status: 'unconfirmed',
           stage: 'mempool',
           confirmations: 0,

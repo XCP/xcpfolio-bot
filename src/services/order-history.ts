@@ -6,7 +6,8 @@
 import { Redis } from '@upstash/redis';
 
 export interface OrderStatus {
-  orderHash: string;
+  orderHash: string;  // Our sell order hash (primary key)
+  matchHash?: string;  // Buyer's buy order hash
   asset: string;
   assetLongname?: string;
   price: number; // In XCP
@@ -22,7 +23,7 @@ export interface OrderStatus {
   deliveredAt?: number; // When transfer tx was confirmed (delivery complete)
   confirmedAt?: number; // When transaction was confirmed
   confirmedBlock?: number; // Block height when transfer was confirmed
-  txid?: string;
+  txid?: string;  // Asset transfer transaction ID
   error?: string;
   retryCount?: number;
   lastUpdated: number;
