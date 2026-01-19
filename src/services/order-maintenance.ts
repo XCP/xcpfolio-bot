@@ -103,69 +103,15 @@ export class OrderMaintenanceService {
   }
 
   /**
-   * Recover active orders from previous run
-   * Checks if orders are confirmed or still pending, clears stale ones
+   * Log active orders status (read-only, NO clearing)
+   * Clearing is ONLY done by TTL (2 hours) - never programmatically
    */
-  private async recoverActiveOrders(): Promise<void> {
-    console.log(`[${this.timestamp()}] Checking for active orders from previous run...`);
-
-    // Clear stale orders (older than 2 hours)
-    const staleAssets = await this.stateManager.clearStaleActiveOrders(
-      MAINTENANCE_RETRY_STRATEGY.STALE_ORDER_AGE
-    );
-    if (staleAssets.length > 0) {
-      console.log(`  Cleared ${staleAssets.length} stale orders: ${staleAssets.join(', ')}`);
-    }
-
+  private async logActiveOrders(): Promise<void> {
     const activeOrders = await this.stateManager.getActiveOrders();
-    const activeCount = Object.keys(activeOrders).length;
-
-    if (activeCount === 0) {
-      console.log('  No active orders to recover');
-      return;
+    const count = Object.keys(activeOrders).length;
+    if (count > 0) {
+      console.log(`[${this.timestamp()}] Active orders in Redis: ${count} (will skip these)`);
     }
-
-    console.log(`  Found ${activeCount} active orders to check`);
-
-    // Get current state from chain
-    const [existingOrders, pendingOrders] = await Promise.all([
-      this.counterparty.getOpenOrderAssets(this.config.xcpfolioAddress),
-      this.counterparty.getMempoolOrderAssets(this.config.xcpfolioAddress)
-    ]);
-
-    let confirmed = 0;
-    let pending = 0;
-    let dropped = 0;
-
-    const RECENT_THRESHOLD = 5 * 60 * 1000; // 5 minutes - don't clear orders marked within this time
-
-    for (const [asset, order] of Object.entries(activeOrders)) {
-      if (existingOrders.has(asset)) {
-        // Order is confirmed on chain - clear tracking
-        await this.stateManager.clearActiveOrder(asset);
-        confirmed++;
-        console.log(`  ✓ ${asset}: confirmed on chain`);
-      } else if (pendingOrders.has(asset)) {
-        // Order still in mempool - keep tracking
-        pending++;
-        console.log(`  ⏳ ${asset}: still pending in mempool`);
-      } else {
-        // Not in chain or mempool - but check if it was marked recently
-        const orderAge = Date.now() - (order.broadcastTime || 0);
-        if (orderAge < RECENT_THRESHOLD) {
-          // Too recent - might still be propagating, keep tracking
-          pending++;
-          console.log(`  ⏳ ${asset}: marked ${Math.round(orderAge/1000)}s ago, keeping (propagation window)`);
-        } else {
-          // Old enough that it should have propagated - clear and retry
-          await this.stateManager.clearActiveOrder(asset);
-          dropped++;
-          console.log(`  ⚠ ${asset}: dropped after ${Math.round(orderAge/1000)}s (will re-create)`);
-        }
-      }
-    }
-
-    console.log(`  Recovery complete: ${confirmed} confirmed, ${pending} pending, ${dropped} dropped`);
   }
 
   /**
@@ -215,11 +161,8 @@ export class OrderMaintenanceService {
       // Record run start
       await this.stateManager.setLastRun();
 
-      // 1. Recover active orders from previous run
-      await this.recoverActiveOrders();
-
-      // 2. Clear failure tracking for fresh run (failures are per-run)
-      await this.stateManager.clearFailures();
+      // 1. Log active orders (read-only - no clearing!)
+      await this.logActiveOrders();
 
       // 3. Check mempool capacity - bail if at limit
       const unconfirmedCount = await this.bitcoin.getUnconfirmedTxCount(this.config.xcpfolioAddress);
@@ -398,54 +341,28 @@ export class OrderMaintenanceService {
           const msg = err.message || String(err);
           console.log(`  ❌ ${msg}`);
 
-          // CRITICAL: Check if order actually made it to mempool despite the error
-          // This handles cases where broadcast succeeds but we get a network error on response
-          console.log('  Checking mempool after error (waiting 15s for propagation)...');
-          await this.sleep(15000); // Give it time to propagate
+          // Check mempool to see if order actually made it despite the error
+          console.log('  Checking mempool after error...');
+          await this.sleep(5000);
           const mempoolAfterError = await this.counterparty.getMempoolOrderAssets(this.config.xcpfolioAddress);
 
           if (mempoolAfterError.has(asset)) {
-            console.log('  ✅ Order found in mempool despite error - treating as success');
+            console.log('  ✅ Order found in mempool despite error - success');
             currentUnconfirmed++;
-            await this.stateManager.clearFailure(asset);
-            return { asset, price, success: true, txid: 'confirmed-after-error' };
+            return { asset, price, success: true, txid: 'found-in-mempool' };
           }
 
-          // Order NOT in mempool yet - but DON'T clear active order state!
-          // Keep it marked so recoverActiveOrders() on next run can verify properly.
-          // This prevents duplicates if the order is just slow to propagate.
-          console.log('  Order not in mempool yet - keeping marked, next run will verify');
+          // Asset stays marked in Redis - NEVER clear it here
+          // Better to skip for 2 hours than create duplicates
+          console.log('  Keeping marked in Redis (TTL will expire in 2h if truly failed)');
 
           // Check for insufficient BTC - bail completely
           if (this.isInsufficientFundsError(msg)) {
-            console.log('\n💸 Insufficient BTC - bailing early. Need to fund address.');
-            await NotificationService.warning('Order maintenance: Insufficient BTC', {
-              asset,
-              error: msg
-            });
+            console.log('\n💸 Insufficient BTC - bailing early.');
             return { asset, price, success: false, error: msg };
           }
 
-          // Track failure for cross-run retry management
-          const failureCount = await this.stateManager.trackFailure(asset, msg);
-
-          if (failureCount >= MAINTENANCE_RETRY_STRATEGY.MAX_ATTEMPTS) {
-            console.log(`  Max retries (${MAINTENANCE_RETRY_STRATEGY.MAX_ATTEMPTS}) reached for ${asset}`);
-            await NotificationService.warning(`Order maintenance: Max retries for ${asset}`, {
-              attempts: failureCount,
-              lastError: msg
-            });
-          }
-
-          // Alert at thresholds
-          if (failureCount === MAINTENANCE_RETRY_STRATEGY.ALERT_AT_5) {
-            await NotificationService.warning(`Order maintenance: 5 failures for ${asset}`, { error: msg });
-          } else if (failureCount === MAINTENANCE_RETRY_STRATEGY.ALERT_AT_10) {
-            await NotificationService.warning(`Order maintenance: 10 failures for ${asset}`, { error: msg });
-          }
-
-          // Return failure - no in-run retry, next cron run will pick it up
-          return { asset, price, success: false, error: msg, retries: failureCount };
+          return { asset, price, success: false, error: msg };
         }
       };
 
