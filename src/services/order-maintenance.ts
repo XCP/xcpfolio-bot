@@ -179,13 +179,21 @@ export class OrderMaintenanceService {
    */
   async run(): Promise<MaintenanceResult[]> {
     if (this.isRunning) {
-      console.log(`[${this.timestamp()}] Already running, skipping`);
+      console.log(`[${this.timestamp()}] Already running (local), skipping`);
+      return [];
+    }
+
+    // Try to acquire distributed lock (5 minute TTL)
+    const lockAcquired = await this.stateManager.acquireLock(300);
+    if (!lockAcquired) {
+      console.log(`[${this.timestamp()}] Another instance is running (distributed lock), skipping`);
       return [];
     }
 
     this.isRunning = true;
     const results: MaintenanceResult[] = [];
     const startTime = Date.now();
+    const processedThisRun = new Set<string>(); // Track assets we've broadcast in THIS run
 
     try {
       console.log(`\n[${this.timestamp()}] Order Maintenance starting...`);
@@ -286,6 +294,10 @@ export class OrderMaintenanceService {
       let processedCount = 0;
       let retryCount = 0;
 
+      // DEFENSE IN DEPTH: Track pending orders in a mutable Set
+      // This gets updated as we process, so we don't need to re-query mempool for each asset
+      const pendingOrdersSet = new Set([...pendingOrders]);
+
       // Helper to process a single asset
       const processAsset = async (
         asset: string,
@@ -300,6 +312,35 @@ export class OrderMaintenanceService {
         if (currentUnconfirmed >= this.config.maxMempoolTxs!) {
           console.log('  ⚠ Mempool at capacity - stopping');
           return null; // Signal to stop
+        }
+
+        // DUPLICATE PREVENTION LAYER 1: Check local tracking for this run
+        if (processedThisRun.has(asset)) {
+          console.log('  ⏭ Already processed in this run - skipping');
+          return null;
+        }
+
+        // DUPLICATE PREVENTION LAYER 2: Check tracked pending orders Set
+        if (pendingOrdersSet.has(asset)) {
+          console.log('  ⏭ Already in pending orders Set - skipping');
+          return null;
+        }
+
+        // DUPLICATE PREVENTION LAYER 3: Re-check Redis state (fresh, bypasses cache)
+        const hasActiveOrder = await this.stateManager.hasActiveOrderFresh(asset);
+        if (hasActiveOrder) {
+          console.log('  ⏭ Already has active order in state - skipping');
+          return null;
+        }
+
+        // DUPLICATE PREVENTION LAYER 4: Final mempool re-check before composing
+        // This catches any external broadcasts since the run started
+        const freshPending = await this.counterparty.getMempoolOrderAssets(this.config.xcpfolioAddress);
+        if (freshPending.has(asset)) {
+          console.log('  ⏭ Detected in fresh mempool check - skipping');
+          // Also update our local set
+          pendingOrdersSet.add(asset);
+          return null;
         }
 
         try {
@@ -331,8 +372,10 @@ export class OrderMaintenanceService {
           const txid = await this.bitcoin.broadcastTransaction(signedTx.hex);
           console.log(`  Broadcast: ${txid}`);
 
-          // Track active order in state
+          // Track active order in state AND locally for this run
           await this.stateManager.markOrderActive(asset, txid, price);
+          processedThisRun.add(asset);
+          pendingOrdersSet.add(asset); // Update local pending set too
 
           // Post-broadcast verification (optional, adds latency)
           console.log('  Verifying...');
@@ -478,6 +521,8 @@ export class OrderMaintenanceService {
       throw error;
     } finally {
       this.isRunning = false;
+      // Release distributed lock
+      await this.stateManager.releaseLock();
     }
   }
 

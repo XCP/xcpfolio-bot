@@ -28,9 +28,11 @@ export interface MaintenanceState {
 export class MaintenanceStateManager {
   private redis: Redis;
   private stateKey: string;
+  private lockKey: string;
   private state: MaintenanceState | null = null;
   private cacheExpiry = 5000; // 5 second cache to reduce Redis calls
   private lastCacheTime = 0;
+  private lockId: string | null = null;
 
   constructor() {
     if (!process.env.KV_REST_API_URL || !process.env.KV_REST_API_TOKEN) {
@@ -43,7 +45,62 @@ export class MaintenanceStateManager {
     });
 
     this.stateKey = 'xcpfolio:maintenance:state';
+    this.lockKey = 'xcpfolio:maintenance:lock';
     console.log('[MaintenanceState] Using Redis/KV for state persistence');
+  }
+
+  /**
+   * Acquire a distributed lock to prevent concurrent runs
+   * Returns true if lock acquired, false if another run is active
+   */
+  async acquireLock(ttlSeconds: number = 300): Promise<boolean> {
+    const lockId = `${Date.now()}-${Math.random().toString(36).substring(7)}`;
+
+    // Try to set lock with NX (only if not exists)
+    const result = await this.redis.set(this.lockKey, lockId, {
+      nx: true,
+      ex: ttlSeconds
+    });
+
+    if (result === 'OK') {
+      this.lockId = lockId;
+      console.log(`[MaintenanceState] Acquired distributed lock: ${lockId}`);
+      return true;
+    }
+
+    // Lock exists - check who owns it
+    const existingLock = await this.redis.get<string>(this.lockKey);
+    console.log(`[MaintenanceState] Lock already held: ${existingLock}`);
+    return false;
+  }
+
+  /**
+   * Release the distributed lock
+   */
+  async releaseLock(): Promise<void> {
+    if (!this.lockId) return;
+
+    // Only release if we own the lock
+    const currentLock = await this.redis.get<string>(this.lockKey);
+    if (currentLock === this.lockId) {
+      await this.redis.del(this.lockKey);
+      console.log(`[MaintenanceState] Released distributed lock: ${this.lockId}`);
+    }
+    this.lockId = null;
+  }
+
+  /**
+   * Check if an asset has an active order (for duplicate prevention)
+   * This bypasses the cache to get fresh data
+   */
+  async hasActiveOrderFresh(asset: string): Promise<boolean> {
+    try {
+      const state = await this.redis.get<MaintenanceState>(this.stateKey);
+      return !!(state?.activeOrders?.[asset]);
+    } catch (error) {
+      console.error('[MaintenanceState] Error checking active order:', error);
+      return false;
+    }
   }
 
   /**
