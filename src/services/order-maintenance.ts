@@ -137,6 +137,8 @@ export class OrderMaintenanceService {
     let pending = 0;
     let dropped = 0;
 
+    const RECENT_THRESHOLD = 5 * 60 * 1000; // 5 minutes - don't clear orders marked within this time
+
     for (const [asset, order] of Object.entries(activeOrders)) {
       if (existingOrders.has(asset)) {
         // Order is confirmed on chain - clear tracking
@@ -148,10 +150,18 @@ export class OrderMaintenanceService {
         pending++;
         console.log(`  ⏳ ${asset}: still pending in mempool`);
       } else {
-        // Order dropped - clear tracking, will be re-created
-        await this.stateManager.clearActiveOrder(asset);
-        dropped++;
-        console.log(`  ⚠ ${asset}: dropped (will re-create)`);
+        // Not in chain or mempool - but check if it was marked recently
+        const orderAge = Date.now() - (order.broadcastTime || 0);
+        if (orderAge < RECENT_THRESHOLD) {
+          // Too recent - might still be propagating, keep tracking
+          pending++;
+          console.log(`  ⏳ ${asset}: marked ${Math.round(orderAge/1000)}s ago, keeping (propagation window)`);
+        } else {
+          // Old enough that it should have propagated - clear and retry
+          await this.stateManager.clearActiveOrder(asset);
+          dropped++;
+          console.log(`  ⚠ ${asset}: dropped after ${Math.round(orderAge/1000)}s (will re-create)`);
+        }
       }
     }
 
