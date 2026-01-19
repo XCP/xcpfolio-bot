@@ -343,6 +343,12 @@ export class OrderMaintenanceService {
           return null;
         }
 
+        // CRITICAL: Mark as "in progress" BEFORE composing to prevent race conditions
+        // This ensures even if we error out, we won't retry without checking
+        processedThisRun.add(asset);
+        pendingOrdersSet.add(asset);
+        await this.stateManager.markOrderActive(asset, 'pending', price);
+
         try {
           // Compose order
           console.log('  Composing...');
@@ -372,10 +378,8 @@ export class OrderMaintenanceService {
           const txid = await this.bitcoin.broadcastTransaction(signedTx.hex);
           console.log(`  Broadcast: ${txid}`);
 
-          // Track active order in state AND locally for this run
+          // Update active order with actual txid (was marked as 'pending' before compose)
           await this.stateManager.markOrderActive(asset, txid, price);
-          processedThisRun.add(asset);
-          pendingOrdersSet.add(asset); // Update local pending set too
 
           // Post-broadcast verification (optional, adds latency)
           console.log('  Verifying...');
@@ -395,6 +399,26 @@ export class OrderMaintenanceService {
         } catch (err: any) {
           const msg = err.message || String(err);
           console.log(`  ❌ ${msg}`);
+
+          // CRITICAL: Check if order actually made it to mempool despite the error
+          // This handles cases where broadcast succeeds but we get a network error on response
+          console.log('  Checking mempool after error...');
+          await this.sleep(2000); // Give it a moment to propagate
+          const mempoolAfterError = await this.counterparty.getMempoolOrderAssets(this.config.xcpfolioAddress);
+
+          if (mempoolAfterError.has(asset)) {
+            console.log('  ✅ Order found in mempool despite error - treating as success');
+            currentUnconfirmed++;
+            await this.stateManager.clearFailure(asset);
+            return { asset, price, success: true, txid: 'confirmed-after-error' };
+          }
+
+          // Order NOT in mempool - safe to retry
+          // Clear "in progress" markers since the attempt truly failed
+          console.log('  Order not in mempool - clearing markers for retry');
+          processedThisRun.delete(asset);
+          pendingOrdersSet.delete(asset);
+          await this.stateManager.clearActiveOrder(asset);
 
           // Check for insufficient BTC - bail completely
           if (this.isInsufficientFundsError(msg)) {
