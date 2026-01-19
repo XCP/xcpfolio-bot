@@ -211,10 +211,9 @@ export class OrderMaintenanceService {
       }
       console.log(`\nMempool: ${unconfirmedCount}/${this.config.maxMempoolTxs}`);
 
-      // 4. Get lowest fee rate from mempool.space
-      const feeRates = await this.bitcoin.getFeeRates();
-      const feeRate = Math.max(feeRates.minimumFee, 0.15);
-      console.log(`Fee rate: ${feeRate} sat/vB`);
+      // 4. Get actual minimum fee rate (supports sub-1 sat/vB)
+      const feeRate = await this.bitcoin.getActualMinimumFeeRate();
+      console.log(`Fee rate: ${feeRate.toFixed(2)} sat/vB`);
 
       // 5. Get XCPFOLIO.* balances (assets that need to be listed)
       const balances = await this.counterparty.getXcpfolioBalances(this.config.xcpfolioAddress);

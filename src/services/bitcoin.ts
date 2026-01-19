@@ -26,6 +26,15 @@ export interface FeeRates {
   minimumFee: number;
 }
 
+export interface MempoolBlock {
+  blockSize: number;
+  blockVSize: number;
+  nTx: number;
+  totalFees: number;
+  medianFee: number;
+  feeRange: number[];
+}
+
 export interface SignedTransaction {
   hex: string;
   txid: string;
@@ -151,6 +160,42 @@ export class BitcoinService {
     const fees = await this.getFeeRates();
     // Target 1-block confirmation
     return fees.fastestFee;
+  }
+
+  /**
+   * Get actual minimum fee rate from mempool-blocks endpoint
+   * This returns sub-1 sat/vB rates when mempool is empty
+   */
+  async getActualMinimumFeeRate(): Promise<number> {
+    try {
+      const response = await axios.get<MempoolBlock[]>(`${MEMPOOL_API}/v1/fees/mempool-blocks`);
+      const blocks = response.data;
+
+      if (!blocks || blocks.length === 0) {
+        // Mempool essentially empty, use minimum relay fee
+        return 0.15;
+      }
+
+      // Get the minimum fee from the lowest fee range of the last projected block
+      // feeRange is [min, 10th, 25th, 50th, 75th, 90th, max]
+      const lastBlock = blocks[blocks.length - 1];
+      const minFee = lastBlock.feeRange?.[0];
+
+      if (minFee !== undefined && minFee > 0) {
+        // Add small buffer (10%) to ensure inclusion
+        return Math.max(minFee * 1.1, 0.15);
+      }
+
+      // Fallback: if only 1 block projected, mempool is nearly empty
+      if (blocks.length === 1) {
+        return 0.15;
+      }
+
+      return 1; // Default fallback
+    } catch (error) {
+      console.warn('Failed to fetch mempool-blocks, using fallback fee rate');
+      return 1;
+    }
   }
 
   /**
