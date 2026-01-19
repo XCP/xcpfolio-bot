@@ -139,16 +139,16 @@ export class OrderMaintenanceService {
 
     for (const [asset, order] of Object.entries(activeOrders)) {
       if (existingOrders.has(asset)) {
-        // Order is confirmed on chain
+        // Order is confirmed on chain - clear tracking
         await this.stateManager.clearActiveOrder(asset);
         confirmed++;
         console.log(`  ✓ ${asset}: confirmed on chain`);
       } else if (pendingOrders.has(asset)) {
-        // Order still in mempool
+        // Order still in mempool - keep tracking
         pending++;
         console.log(`  ⏳ ${asset}: still pending in mempool`);
       } else {
-        // Order dropped - will be re-created
+        // Order dropped - clear tracking, will be re-created
         await this.stateManager.clearActiveOrder(asset);
         dropped++;
         console.log(`  ⚠ ${asset}: dropped (will re-create)`);
@@ -331,16 +331,6 @@ export class OrderMaintenanceService {
           return null;
         }
 
-        // DUPLICATE PREVENTION LAYER 4: Final mempool re-check before composing
-        // This catches any external broadcasts since the run started
-        const freshPending = await this.counterparty.getMempoolOrderAssets(this.config.xcpfolioAddress);
-        if (freshPending.has(asset)) {
-          console.log('  ⏭ Detected in fresh mempool check - skipping');
-          // Also update our local set
-          pendingOrdersSet.add(asset);
-          return null;
-        }
-
         // CRITICAL: Mark as "in progress" BEFORE composing to prevent race conditions
         // This ensures even if we error out, we won't retry without checking
         processedThisRun.add(asset);
@@ -376,7 +366,7 @@ export class OrderMaintenanceService {
           const txid = await this.bitcoin.broadcastTransaction(signedTx.hex);
           console.log(`  Broadcast: ${txid}`);
 
-          // Update active order with actual txid (was marked as 'pending' before compose)
+          // Update Redis state with actual txid
           await this.stateManager.markOrderActive(asset, txid, price);
 
           // Post-broadcast verification (optional, adds latency)
@@ -411,10 +401,10 @@ export class OrderMaintenanceService {
             return { asset, price, success: true, txid: 'confirmed-after-error' };
           }
 
-          // Order NOT in mempool - clear active order state but KEEP in processedThisRun
-          // This ensures we don't retry this asset in THIS run (next cron run will handle it)
-          console.log('  Order not in mempool - will retry on next cron run');
-          await this.stateManager.clearActiveOrder(asset);
+          // Order NOT in mempool yet - but DON'T clear active order state!
+          // Keep it marked so recoverActiveOrders() on next run can verify properly.
+          // This prevents duplicates if the order is just slow to propagate.
+          console.log('  Order not in mempool yet - keeping marked, next run will verify');
 
           // Check for insufficient BTC - bail completely
           if (this.isInsufficientFundsError(msg)) {
