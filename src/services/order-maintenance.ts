@@ -1,7 +1,8 @@
 import { CounterpartyService } from './counterparty';
-import { BitcoinService, SignedTransaction } from './bitcoin';
+import { BitcoinService } from './bitcoin';
 import { NotificationService } from './notifications';
-import { TX_LIMITS, TIME, ASSET_CONFIG } from '../constants';
+import { MaintenanceStateManager } from './maintenance-state';
+import { TX_LIMITS, ASSET_CONFIG, MAINTENANCE_RETRY_STRATEGY } from '../constants';
 
 export interface OrderMaintenanceConfig {
   xcpfolioAddress: string;
@@ -20,9 +21,15 @@ export interface MaintenanceResult {
   success: boolean;
   txid?: string;
   error?: string;
+  retries?: number;
 }
 
 interface AssetPrice {
+  asset: string;
+  price: number;
+}
+
+interface ToProcess {
   asset: string;
   price: number;
 }
@@ -38,10 +45,17 @@ interface AssetPrice {
  * - For each asset with balance, create a new DEX order
  * - Uses lowest fee rate from mempool.space
  * - Bails early if insufficient BTC or mempool at capacity
+ *
+ * Robustness features:
+ * - Redis state persistence for recovery on restart
+ * - Progressive retry with backoff for transient failures
+ * - Post-broadcast mempool verification
+ * - Detailed per-asset logging
  */
 export class OrderMaintenanceService {
   private counterparty: CounterpartyService;
   private bitcoin: BitcoinService;
+  private stateManager: MaintenanceStateManager;
   private config: OrderMaintenanceConfig;
   private prices: Map<string, number> = new Map();
   private isRunning: boolean = false;
@@ -56,6 +70,7 @@ export class OrderMaintenanceService {
 
     this.counterparty = new CounterpartyService();
     this.bitcoin = new BitcoinService(config.network || 'mainnet');
+    this.stateManager = new MaintenanceStateManager();
   }
 
   /**
@@ -69,7 +84,7 @@ export class OrderMaintenanceService {
         this.prices.set(asset, price);
       }
     }
-    console.log(`[OrderMaintenance] Loaded ${this.prices.size} asset prices`);
+    console.log(`[${this.timestamp()}] Loaded ${this.prices.size} asset prices`);
   }
 
   /**
@@ -77,7 +92,84 @@ export class OrderMaintenanceService {
    */
   setPrices(prices: Map<string, number>): void {
     this.prices = prices;
-    console.log(`[OrderMaintenance] Set ${this.prices.size} asset prices`);
+    console.log(`[${this.timestamp()}] Set ${this.prices.size} asset prices`);
+  }
+
+  /**
+   * Format timestamp for logging
+   */
+  private timestamp(): string {
+    return new Date().toISOString();
+  }
+
+  /**
+   * Recover active orders from previous run
+   * Checks if orders are confirmed or still pending, clears stale ones
+   */
+  private async recoverActiveOrders(): Promise<void> {
+    console.log(`[${this.timestamp()}] Checking for active orders from previous run...`);
+
+    // Clear stale orders (older than 2 hours)
+    const staleAssets = await this.stateManager.clearStaleActiveOrders(
+      MAINTENANCE_RETRY_STRATEGY.STALE_ORDER_AGE
+    );
+    if (staleAssets.length > 0) {
+      console.log(`  Cleared ${staleAssets.length} stale orders: ${staleAssets.join(', ')}`);
+    }
+
+    const activeOrders = await this.stateManager.getActiveOrders();
+    const activeCount = Object.keys(activeOrders).length;
+
+    if (activeCount === 0) {
+      console.log('  No active orders to recover');
+      return;
+    }
+
+    console.log(`  Found ${activeCount} active orders to check`);
+
+    // Get current state from chain
+    const [existingOrders, pendingOrders] = await Promise.all([
+      this.counterparty.getOpenOrderAssets(this.config.xcpfolioAddress),
+      this.counterparty.getMempoolOrderAssets(this.config.xcpfolioAddress)
+    ]);
+
+    let confirmed = 0;
+    let pending = 0;
+    let dropped = 0;
+
+    for (const [asset, order] of Object.entries(activeOrders)) {
+      if (existingOrders.has(asset)) {
+        // Order is confirmed on chain
+        await this.stateManager.clearActiveOrder(asset);
+        confirmed++;
+        console.log(`  ✓ ${asset}: confirmed on chain`);
+      } else if (pendingOrders.has(asset)) {
+        // Order still in mempool
+        pending++;
+        console.log(`  ⏳ ${asset}: still pending in mempool`);
+      } else {
+        // Order dropped - will be re-created
+        await this.stateManager.clearActiveOrder(asset);
+        dropped++;
+        console.log(`  ⚠ ${asset}: dropped (will re-create)`);
+      }
+    }
+
+    console.log(`  Recovery complete: ${confirmed} confirmed, ${pending} pending, ${dropped} dropped`);
+  }
+
+  /**
+   * Calculate backoff delay based on failure count
+   */
+  private getBackoffDelay(failureCount: number): number {
+    if (failureCount < MAINTENANCE_RETRY_STRATEGY.QUICK_ATTEMPTS) {
+      return MAINTENANCE_RETRY_STRATEGY.QUICK_BACKOFF;
+    } else if (failureCount < MAINTENANCE_RETRY_STRATEGY.MODERATE_ATTEMPTS) {
+      return MAINTENANCE_RETRY_STRATEGY.MODERATE_BACKOFF;
+    } else if (failureCount < MAINTENANCE_RETRY_STRATEGY.EXTENDED_ATTEMPTS) {
+      return MAINTENANCE_RETRY_STRATEGY.EXTENDED_BACKOFF;
+    }
+    return MAINTENANCE_RETRY_STRATEGY.MAX_BACKOFF;
   }
 
   /**
@@ -87,60 +179,73 @@ export class OrderMaintenanceService {
    */
   async run(): Promise<MaintenanceResult[]> {
     if (this.isRunning) {
-      console.log('[OrderMaintenance] Already running, skipping');
+      console.log(`[${this.timestamp()}] Already running, skipping`);
       return [];
     }
 
     this.isRunning = true;
     const results: MaintenanceResult[] = [];
+    const startTime = Date.now();
 
     try {
-      console.log('\n' + '═'.repeat(50));
-      console.log('  ORDER MAINTENANCE');
-      console.log('═'.repeat(50));
+      console.log(`\n[${this.timestamp()}] Order Maintenance starting...`);
+      console.log('═'.repeat(60));
       console.log(`  Address: ${this.config.xcpfolioAddress}`);
       console.log(`  Mode: ${this.config.dryRun ? 'DRY RUN' : 'LIVE'}`);
-      console.log('═'.repeat(50) + '\n');
+      console.log('═'.repeat(60));
 
-      // 1. Check mempool capacity - bail if at limit
+      // Record run start
+      await this.stateManager.setLastRun();
+
+      // 1. Recover active orders from previous run
+      await this.recoverActiveOrders();
+
+      // 2. Clear failure tracking for fresh run (failures are per-run)
+      await this.stateManager.clearFailures();
+
+      // 3. Check mempool capacity - bail if at limit
       const unconfirmedCount = await this.bitcoin.getUnconfirmedTxCount(this.config.xcpfolioAddress);
       if (unconfirmedCount >= this.config.maxMempoolTxs!) {
-        console.log(`[OrderMaintenance] Mempool at capacity (${unconfirmedCount}/${this.config.maxMempoolTxs}). Bailing.`);
+        console.log(`\n❌ Mempool at capacity (${unconfirmedCount}/${this.config.maxMempoolTxs}). Bailing.`);
         return results;
       }
-      console.log(`[OrderMaintenance] Mempool: ${unconfirmedCount}/${this.config.maxMempoolTxs}`);
+      console.log(`\nMempool: ${unconfirmedCount}/${this.config.maxMempoolTxs}`);
 
-      // 2. Get lowest fee rate from mempool.space
+      // 4. Get lowest fee rate from mempool.space
       const feeRates = await this.bitcoin.getFeeRates();
-      // Use minimumFee for the cheapest rate
       const feeRate = Math.max(feeRates.minimumFee, 0.15);
-      console.log(`[OrderMaintenance] Fee rate: ${feeRate} sat/vB (minimum from mempool.space)`);
+      console.log(`Fee rate: ${feeRate} sat/vB`);
 
-      // 3. Get XCPFOLIO.* balances (assets that need to be listed)
+      // 5. Get XCPFOLIO.* balances (assets that need to be listed)
       const balances = await this.counterparty.getXcpfolioBalances(this.config.xcpfolioAddress);
+      console.log(`Assets with balance: ${balances.size}`);
 
       if (balances.size === 0) {
-        console.log('[OrderMaintenance] No XCPFOLIO.* balances - all assets are listed!');
+        console.log('\n✅ No XCPFOLIO.* balances - all assets are listed!');
         return results;
       }
-      console.log(`[OrderMaintenance] Found ${balances.size} assets with balance`);
 
-      // 4. Get existing orders (confirmed + unconfirmed) to avoid double-broadcasting
+      // 6. Get existing orders (confirmed + unconfirmed) to avoid double-broadcasting
       const [existingOrders, pendingOrders] = await Promise.all([
         this.counterparty.getOpenOrderAssets(this.config.xcpfolioAddress),
         this.counterparty.getMempoolOrderAssets(this.config.xcpfolioAddress)
       ]);
 
-      // Combine existing and pending orders
-      const alreadyListed = new Set([...existingOrders, ...pendingOrders]);
-      console.log(`[OrderMaintenance] Already listed: ${existingOrders.size} confirmed, ${pendingOrders.size} pending`);
+      // Also check our tracked active orders (for orders we just broadcast)
+      const activeOrders = await this.stateManager.getActiveOrders();
+      const activeAssets = new Set(Object.keys(activeOrders));
 
-      // 5. Build list of assets to process (only those with prices AND not already listed)
-      const toProcess: { asset: string; price: number }[] = [];
+      // Combine existing, pending, and active orders
+      const alreadyListed = new Set([...existingOrders, ...pendingOrders, ...activeAssets]);
+      console.log(`Already listed: ${existingOrders.size} confirmed, ${pendingOrders.size} pending, ${activeAssets.size} tracked`);
+
+      // 7. Build list of assets to process (only those with prices AND not already listed)
+      const toProcess: ToProcess[] = [];
+      const skipped = { alreadyListed: 0, noPrice: 0 };
+
       for (const [asset, qty] of balances) {
-        // Skip if already has an order (confirmed or pending)
         if (alreadyListed.has(asset)) {
-          console.log(`  ✓  ${asset}: already listed, skipping`);
+          skipped.alreadyListed++;
           continue;
         }
 
@@ -148,25 +253,26 @@ export class OrderMaintenanceService {
         if (price && price > 0) {
           toProcess.push({ asset, price });
         } else {
-          console.log(`  ⚠️  ${asset}: no price configured, skipping`);
+          skipped.noPrice++;
         }
       }
 
+      console.log(`To process: ${toProcess.length}`);
+      console.log(`Skipped: ${skipped.alreadyListed} already listed, ${skipped.noPrice} no price`);
+
       if (toProcess.length === 0) {
-        console.log('[OrderMaintenance] No assets with prices to list');
+        console.log('\n✅ No assets to list');
         return results;
       }
 
-      console.log(`\n🎯 ${toProcess.length} assets to list:\n`);
-      for (const { asset, price } of toProcess.slice(0, 10)) {
-        console.log(`   ${asset}: ${price} XCP`);
-      }
-      if (toProcess.length > 10) {
-        console.log(`   ... and ${toProcess.length - 10} more`);
-      }
-
       if (this.config.dryRun) {
-        console.log('\n🔍 Dry run - no transactions will be broadcast');
+        console.log('\n🔍 DRY RUN - no transactions will be broadcast\n');
+        for (const { asset, price } of toProcess.slice(0, 20)) {
+          console.log(`  Would list: ${asset} @ ${price} XCP`);
+        }
+        if (toProcess.length > 20) {
+          console.log(`  ... and ${toProcess.length - 20} more`);
+        }
         return toProcess.map(({ asset, price }) => ({
           asset,
           price,
@@ -175,57 +281,78 @@ export class OrderMaintenanceService {
         }));
       }
 
-      // 5. Process orders
+      // 8. Process orders with retry support
       let currentUnconfirmed = unconfirmedCount;
+      const toRetry: ToProcess[] = [];
+      let processedCount = 0;
+      let retryCount = 0;
 
-      for (let i = 0; i < toProcess.length; i++) {
-        const { asset, price } = toProcess[i];
-        console.log(`\n[${i + 1}/${toProcess.length}] ${asset} @ ${price} XCP`);
+      // Helper to process a single asset
+      const processAsset = async (
+        asset: string,
+        price: number,
+        index: number,
+        total: number
+      ): Promise<MaintenanceResult | null> => {
+        console.log(`\n${'='.repeat(60)}`);
+        console.log(`[${index + 1}/${total}] ${asset} @ ${price} XCP`);
 
-        // Check mempool limit before each order
+        // Check mempool limit
         if (currentUnconfirmed >= this.config.maxMempoolTxs!) {
-          console.log(`\n[OrderMaintenance] Mempool at capacity. Bailing (next run handles remaining).`);
-          break;
+          console.log('  ⚠ Mempool at capacity - stopping');
+          return null; // Signal to stop
         }
 
         try {
           // Compose order
-          console.log('   Composing...');
+          console.log('  Composing...');
           const getQuantity = BigInt(Math.round(price * 100000000)); // XCP has 8 decimals
 
           const rawTx = await this.counterparty.composeOrder(
             this.config.xcpfolioAddress,
-            `${ASSET_CONFIG.XCPFOLIO_PREFIX}${asset}`, // XCPFOLIO.ASSETNAME
+            `${ASSET_CONFIG.XCPFOLIO_PREFIX}${asset}`,
             1, // give 1 unit
-            ASSET_CONFIG.XCP, // get XCP
+            ASSET_CONFIG.XCP,
             getQuantity,
             this.config.orderExpiration!,
             feeRate
           );
 
           // Sign transaction
-          console.log('   Signing...');
+          console.log('  Signing...');
           const signedTx = await this.bitcoin.signTransaction(
             rawTx,
             this.config.xcpfolioAddress,
             this.config.privateKey
           );
-          console.log(`   Signed: ${signedTx.vsize} vbytes, ${signedTx.fee} sats fee`);
+          console.log(`  Signed: ${signedTx.vsize} vbytes, ${signedTx.fee} sats`);
 
           // Broadcast
-          console.log('   Broadcasting...');
+          console.log('  Broadcasting...');
           const txid = await this.bitcoin.broadcastTransaction(signedTx.hex);
-          console.log(`   ✅ ${txid}`);
+          console.log(`  Broadcast: ${txid}`);
 
-          results.push({ asset, price, success: true, txid });
+          // Track active order in state
+          await this.stateManager.markOrderActive(asset, txid, price);
+
+          // Post-broadcast verification (optional, adds latency)
+          console.log('  Verifying...');
+          await this.sleep(MAINTENANCE_RETRY_STRATEGY.MEMPOOL_CHECK_DELAY);
+          const pendingCheck = await this.counterparty.getMempoolOrderAssets(this.config.xcpfolioAddress);
+          if (pendingCheck.has(asset)) {
+            console.log('  ✅ Verified in mempool');
+          } else {
+            console.log('  ⚠ Warning: not yet in mempool (may still propagate)');
+          }
+
           currentUnconfirmed++;
+          await this.stateManager.clearFailure(asset);
 
-          // Wait between broadcasts
-          await this.sleep(this.config.waitAfterBroadcast!);
+          return { asset, price, success: true, txid };
 
         } catch (err: any) {
           const msg = err.message || String(err);
-          console.log(`   ❌ ${msg}`);
+          console.log(`  ❌ ${msg}`);
 
           // Check for insufficient BTC - bail completely
           if (this.isInsufficientFundsError(msg)) {
@@ -234,40 +361,118 @@ export class OrderMaintenanceService {
               asset,
               error: msg
             });
-            results.push({ asset, price, success: false, error: msg });
-            break;
+            return { asset, price, success: false, error: msg };
           }
 
-          results.push({ asset, price, success: false, error: msg });
-          // Continue to next asset on other errors
+          // Track failure and check for retry
+          const failureCount = await this.stateManager.trackFailure(asset, msg);
+
+          if (failureCount >= MAINTENANCE_RETRY_STRATEGY.MAX_ATTEMPTS) {
+            console.log(`  Max retries (${MAINTENANCE_RETRY_STRATEGY.MAX_ATTEMPTS}) reached for ${asset}`);
+            await NotificationService.warning(`Order maintenance: Max retries for ${asset}`, {
+              attempts: failureCount,
+              lastError: msg
+            });
+            return { asset, price, success: false, error: msg, retries: failureCount };
+          }
+
+          // Alert at thresholds
+          if (failureCount === MAINTENANCE_RETRY_STRATEGY.ALERT_AT_5) {
+            await NotificationService.warning(`Order maintenance: 5 failures for ${asset}`, { error: msg });
+          } else if (failureCount === MAINTENANCE_RETRY_STRATEGY.ALERT_AT_10) {
+            await NotificationService.warning(`Order maintenance: 10 failures for ${asset}`, { error: msg });
+          }
+
+          // Queue for retry with backoff
+          const backoffMs = this.getBackoffDelay(failureCount);
+          console.log(`  Retry ${failureCount}/${MAINTENANCE_RETRY_STRATEGY.MAX_ATTEMPTS} after ${backoffMs / 1000}s backoff`);
+          toRetry.push({ asset, price });
+
+          return null; // Will retry
+        }
+      };
+
+      // Process initial list
+      for (let i = 0; i < toProcess.length; i++) {
+        const { asset, price } = toProcess[i];
+        const result = await processAsset(asset, price, processedCount, toProcess.length + toRetry.length);
+
+        if (result === null && currentUnconfirmed >= this.config.maxMempoolTxs!) {
+          // Mempool full - stop processing
+          break;
+        }
+
+        if (result) {
+          results.push(result);
+          processedCount++;
+
+          // Check if we should bail on insufficient funds
+          if (!result.success && this.isInsufficientFundsError(result.error || '')) {
+            break;
+          }
+        }
+
+        // Wait between broadcasts
+        await this.sleep(this.config.waitAfterBroadcast!);
+      }
+
+      // Process retries
+      while (toRetry.length > 0 && currentUnconfirmed < this.config.maxMempoolTxs!) {
+        const { asset, price } = toRetry.shift()!;
+        const failure = await this.stateManager.getFailure(asset);
+        const backoffMs = this.getBackoffDelay(failure?.count || 0);
+
+        console.log(`\n⏳ Waiting ${backoffMs / 1000}s before retry of ${asset}...`);
+        await this.sleep(backoffMs);
+
+        retryCount++;
+        const result = await processAsset(asset, price, processedCount, toProcess.length);
+
+        if (result === null && currentUnconfirmed >= this.config.maxMempoolTxs!) {
+          break;
+        }
+
+        if (result) {
+          results.push(result);
+          processedCount++;
+
+          if (!result.success && this.isInsufficientFundsError(result.error || '')) {
+            break;
+          }
         }
       }
 
       // Summary
       const successful = results.filter(r => r.success).length;
       const failed = results.filter(r => !r.success).length;
+      const remaining = toProcess.length - results.length + toRetry.length;
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
 
-      console.log('\n' + '═'.repeat(50));
+      console.log('\n' + '═'.repeat(60));
       console.log('  SUMMARY');
-      console.log('═'.repeat(50));
+      console.log('═'.repeat(60));
       console.log(`  Created: ${successful} orders`);
       console.log(`  Failed: ${failed}`);
-      console.log(`  Remaining: ${toProcess.length - results.length} (next run)`);
-      console.log('═'.repeat(50) + '\n');
+      console.log(`  Retries: ${retryCount}`);
+      console.log(`  Remaining: ${remaining} (next run)`);
+      console.log(`  Duration: ${elapsed}s`);
+      console.log('═'.repeat(60) + '\n');
 
       // Notify if orders were created
       if (successful > 0) {
         await NotificationService.success('📦 Order maintenance complete', {
           created: successful,
           failed,
-          remaining: toProcess.length - results.length
+          retries: retryCount,
+          remaining,
+          duration: elapsed
         });
       }
 
       return results;
 
     } catch (error) {
-      console.error('[OrderMaintenance] Fatal error:', error);
+      console.error(`[${this.timestamp()}] Fatal error:`, error);
       await NotificationService.error('Order maintenance failed', {
         error: error instanceof Error ? error.message : String(error)
       });
@@ -291,10 +496,20 @@ export class OrderMaintenanceService {
   /**
    * Get current status
    */
-  getStatus(): { isRunning: boolean; pricesLoaded: number } {
+  async getStatus(): Promise<{
+    isRunning: boolean;
+    pricesLoaded: number;
+    lastRun: number;
+    activeOrders: number;
+    failedAssets: number;
+  }> {
+    const state = await this.stateManager.getState();
     return {
       isRunning: this.isRunning,
-      pricesLoaded: this.prices.size
+      pricesLoaded: this.prices.size,
+      lastRun: state.lastRun,
+      activeOrders: Object.keys(state.activeOrders).length,
+      failedAssets: Object.keys(state.failedAssets).length,
     };
   }
 

@@ -16,6 +16,29 @@ export const BLOCKS = {
   PER_DAY: 144,
 } as const;
 
+// Maintenance retry strategy constants
+export const MAINTENANCE_RETRY_STRATEGY = {
+  // Retry thresholds
+  QUICK_ATTEMPTS: 3,        // First 3: retry quickly
+  MODERATE_ATTEMPTS: 5,     // Attempts 4-5: moderate backoff
+  EXTENDED_ATTEMPTS: 10,    // Attempts 6-10: longer backoff
+  MAX_ATTEMPTS: 10,         // Max retries per asset per run
+
+  // Backoff delays (ms)
+  QUICK_BACKOFF: 5 * 1000,       // 5 seconds
+  MODERATE_BACKOFF: 15 * 1000,   // 15 seconds
+  EXTENDED_BACKOFF: 30 * 1000,   // 30 seconds
+  MAX_BACKOFF: 60 * 1000,        // 60 seconds
+
+  // Active order tracking
+  STALE_ORDER_AGE: 2 * 60 * 60 * 1000,  // 2 hours - consider order stale/dropped
+  MEMPOOL_CHECK_DELAY: 2000,            // 2 seconds to verify mempool
+
+  // Alert thresholds
+  ALERT_AT_5: 5,
+  ALERT_AT_10: 10,
+} as const;
+
 // Retry strategy constants
 export const RETRY_STRATEGY = {
   // Pre-broadcast retries (compose/sign failures)
