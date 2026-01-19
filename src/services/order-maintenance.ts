@@ -288,11 +288,9 @@ export class OrderMaintenanceService {
         }));
       }
 
-      // 8. Process orders with retry support
+      // 8. Process orders sequentially (no in-run retries - failures handled by next cron run)
       let currentUnconfirmed = unconfirmedCount;
-      const toRetry: ToProcess[] = [];
       let processedCount = 0;
-      let retryCount = 0;
 
       // DEFENSE IN DEPTH: Track pending orders in a mutable Set
       // This gets updated as we process, so we don't need to re-query mempool for each asset
@@ -413,11 +411,9 @@ export class OrderMaintenanceService {
             return { asset, price, success: true, txid: 'confirmed-after-error' };
           }
 
-          // Order NOT in mempool - safe to retry
-          // Clear "in progress" markers since the attempt truly failed
-          console.log('  Order not in mempool - clearing markers for retry');
-          processedThisRun.delete(asset);
-          pendingOrdersSet.delete(asset);
+          // Order NOT in mempool - clear active order state but KEEP in processedThisRun
+          // This ensures we don't retry this asset in THIS run (next cron run will handle it)
+          console.log('  Order not in mempool - will retry on next cron run');
           await this.stateManager.clearActiveOrder(asset);
 
           // Check for insufficient BTC - bail completely
@@ -430,7 +426,7 @@ export class OrderMaintenanceService {
             return { asset, price, success: false, error: msg };
           }
 
-          // Track failure and check for retry
+          // Track failure for cross-run retry management
           const failureCount = await this.stateManager.trackFailure(asset, msg);
 
           if (failureCount >= MAINTENANCE_RETRY_STRATEGY.MAX_ATTEMPTS) {
@@ -439,7 +435,6 @@ export class OrderMaintenanceService {
               attempts: failureCount,
               lastError: msg
             });
-            return { asset, price, success: false, error: msg, retries: failureCount };
           }
 
           // Alert at thresholds
@@ -449,28 +444,27 @@ export class OrderMaintenanceService {
             await NotificationService.warning(`Order maintenance: 10 failures for ${asset}`, { error: msg });
           }
 
-          // Queue for retry with backoff
-          const backoffMs = this.getBackoffDelay(failureCount);
-          console.log(`  Retry ${failureCount}/${MAINTENANCE_RETRY_STRATEGY.MAX_ATTEMPTS} after ${backoffMs / 1000}s backoff`);
-          toRetry.push({ asset, price });
-
-          return null; // Will retry
+          // Return failure - no in-run retry, next cron run will pick it up
+          return { asset, price, success: false, error: msg, retries: failureCount };
         }
       };
 
-      // Process initial list
+      // Process each asset once - no in-run retries (like fulfillment service)
       for (let i = 0; i < toProcess.length; i++) {
         const { asset, price } = toProcess[i];
-        const result = await processAsset(asset, price, processedCount, toProcess.length + toRetry.length);
+        const result = await processAsset(asset, price, i, toProcess.length);
 
         if (result === null && currentUnconfirmed >= this.config.maxMempoolTxs!) {
           // Mempool full - stop processing
+          console.log(`Stopping: mempool at capacity`);
           break;
         }
 
         if (result) {
           results.push(result);
-          processedCount++;
+          if (result.success) {
+            processedCount++;
+          }
 
           // Check if we should bail on insufficient funds
           if (!result.success && this.isInsufficientFundsError(result.error || '')) {
@@ -482,45 +476,18 @@ export class OrderMaintenanceService {
         await this.sleep(this.config.waitAfterBroadcast!);
       }
 
-      // Process retries
-      while (toRetry.length > 0 && currentUnconfirmed < this.config.maxMempoolTxs!) {
-        const { asset, price } = toRetry.shift()!;
-        const failure = await this.stateManager.getFailure(asset);
-        const backoffMs = this.getBackoffDelay(failure?.count || 0);
-
-        console.log(`\n⏳ Waiting ${backoffMs / 1000}s before retry of ${asset}...`);
-        await this.sleep(backoffMs);
-
-        retryCount++;
-        const result = await processAsset(asset, price, processedCount, toProcess.length);
-
-        if (result === null && currentUnconfirmed >= this.config.maxMempoolTxs!) {
-          break;
-        }
-
-        if (result) {
-          results.push(result);
-          processedCount++;
-
-          if (!result.success && this.isInsufficientFundsError(result.error || '')) {
-            break;
-          }
-        }
-      }
-
       // Summary
       const successful = results.filter(r => r.success).length;
       const failed = results.filter(r => !r.success).length;
-      const remaining = toProcess.length - results.length + toRetry.length;
+      const notProcessed = toProcess.length - results.length;
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
 
       console.log('\n' + '═'.repeat(60));
       console.log('  SUMMARY');
       console.log('═'.repeat(60));
       console.log(`  Created: ${successful} orders`);
-      console.log(`  Failed: ${failed}`);
-      console.log(`  Retries: ${retryCount}`);
-      console.log(`  Remaining: ${remaining} (next run)`);
+      console.log(`  Failed: ${failed} (will retry next run)`);
+      console.log(`  Not processed: ${notProcessed} (mempool full or bailed)`);
       console.log(`  Duration: ${elapsed}s`);
       console.log('═'.repeat(60) + '\n');
 
@@ -529,8 +496,7 @@ export class OrderMaintenanceService {
         await NotificationService.success('📦 Order maintenance complete', {
           created: successful,
           failed,
-          retries: retryCount,
-          remaining,
+          notProcessed,
           duration: elapsed
         });
       }
