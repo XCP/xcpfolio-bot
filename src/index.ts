@@ -16,6 +16,8 @@ import * as cron from 'node-cron';
 import { FulfillmentProcessor } from './services/fulfillment';
 import { OrderHistoryService } from './services/order-history';
 import { ConfirmationMonitor } from './services/confirmation-monitor';
+import { OrderMaintenanceService } from './services/order-maintenance';
+import { loadPrices } from './services/prices';
 import { startApiServer } from './api-server';
 
 // Validate environment variables
@@ -43,6 +45,29 @@ const processor = new FulfillmentProcessor({
   orderHistoryPath: process.env.VERCEL ? '/tmp/.order-history.json' : '.order-history.json',
 });
 
+// Initialize order maintenance service
+const orderMaintenance = new OrderMaintenanceService({
+  xcpfolioAddress: process.env.XCPFOLIO_ADDRESS!,
+  privateKey: process.env.XCPFOLIO_PRIVATE_KEY!,
+  network: (process.env.NETWORK as 'mainnet' | 'testnet') || 'mainnet',
+  dryRun: process.env.DRY_RUN === 'true',
+  maxMempoolTxs: process.env.MAX_MEMPOOL_TXS ? parseInt(process.env.MAX_MEMPOOL_TXS) : 25,
+  orderExpiration: process.env.ORDER_EXPIRATION ? parseInt(process.env.ORDER_EXPIRATION) : 8064,
+  waitAfterBroadcast: process.env.WAIT_AFTER_BROADCAST ? parseInt(process.env.WAIT_AFTER_BROADCAST) : 10000,
+});
+
+// Load prices for order maintenance
+const prices = loadPrices();
+if (prices.size > 0) {
+  orderMaintenance.setPrices(prices);
+  console.log(`Loaded ${prices.size} asset prices for order maintenance`);
+} else {
+  console.warn('No prices loaded - order maintenance will be disabled');
+}
+
+// Order maintenance enabled flag
+const orderMaintenanceEnabled = process.env.ORDER_MAINTENANCE_ENABLED !== 'false' && prices.size > 0;
+
 // Statistics
 let stats = {
   runs: 0,
@@ -51,6 +76,9 @@ let stats = {
   failed: 0,
   startTime: new Date(),
   lastRun: null as Date | null,
+  maintenanceRuns: 0,
+  ordersCreated: 0,
+  lastMaintenanceRun: null as Date | null,
 };
 
 // Run fulfillment check
@@ -79,6 +107,50 @@ async function runFulfillment() {
     
   } catch (error) {
     console.error('❌ Fulfillment error:', error);
+    await sendErrorNotification(error);
+  }
+}
+
+// Run order maintenance
+async function runOrderMaintenance() {
+  if (!orderMaintenanceEnabled) {
+    return;
+  }
+
+  const runTime = new Date();
+  stats.maintenanceRuns++;
+
+  try {
+    console.log(`\n${'#'.repeat(70)}`);
+    console.log(`# Order Maintenance #${stats.maintenanceRuns} at ${runTime.toISOString()}`);
+    console.log(`${'#'.repeat(70)}`);
+
+    const results = await orderMaintenance.run();
+
+    stats.lastMaintenanceRun = runTime;
+    stats.ordersCreated += results.filter(r => r.success).length;
+
+    if (results.length > 0) {
+      const successful = results.filter(r => r.success);
+      const failed = results.filter(r => !r.success);
+
+      if (successful.length > 0) {
+        const message = successful.map(r =>
+          `📦 Listed ${r.asset} @ ${r.price} XCP${r.txid ? ` (${r.txid.slice(0, 8)}...)` : ''}`
+        ).join('\n');
+        await notify(`Created ${successful.length} orders:\n${message}`);
+      }
+
+      if (failed.length > 0) {
+        const message = failed.map(r =>
+          `❌ ${r.asset}: ${r.error?.slice(0, 50)}`
+        ).join('\n');
+        await notify(`Failed ${failed.length} orders:\n${message}`, 'error');
+      }
+    }
+
+  } catch (error) {
+    console.error('❌ Order maintenance error:', error);
     await sendErrorNotification(error);
   }
 }
@@ -198,6 +270,7 @@ async function main() {
   console.log(`RBF Enabled: ${process.env.RBF_ENABLED !== 'false' ? 'YES' : 'NO'}`);
   console.log(`Max Fee: ${process.env.MAX_TOTAL_FEE_SATS || 10000} sats (${(parseInt(process.env.MAX_TOTAL_FEE_SATS || '10000') / 100000000).toFixed(6)} BTC)`);
   console.log(`Max Rate (New): ${process.env.MAX_FEE_RATE_FOR_NEW_TX || 100} sat/vB`);
+  console.log(`Order Maintenance: ${orderMaintenanceEnabled ? 'ENABLED' : 'DISABLED'} (${prices.size} prices)`);
   console.log('='.repeat(70));
 
   // Start API server for order status (using processor's orderHistory)
@@ -213,9 +286,15 @@ async function main() {
   // Run immediately on startup
   console.log('\nRunning initial check...');
   await runFulfillment();
-  
+
   // Also check confirmations on startup
   await confirmationMonitor.checkConfirmations();
+
+  // Run order maintenance on startup (if enabled)
+  if (orderMaintenanceEnabled) {
+    console.log('\nRunning initial order maintenance...');
+    await runOrderMaintenance();
+  }
 
   // Schedule fulfillment based on CHECK_INTERVAL
   const checkInterval = process.env.CHECK_INTERVAL || '* * * * *';
@@ -228,12 +307,27 @@ async function main() {
     }
     await runFulfillment();
   });
-  
+
   // Schedule confirmation checks every 30 seconds
   cron.schedule('*/30 * * * * *', async () => {
     await confirmationMonitor.checkConfirmations();
   });
-  
+
+  // Schedule order maintenance (every hour by default)
+  const maintenanceInterval = process.env.MAINTENANCE_INTERVAL || '0 * * * *'; // Top of every hour
+  if (orderMaintenanceEnabled) {
+    cron.schedule(maintenanceInterval, async () => {
+      // Only run if not already processing fulfillment
+      const state = await processor.getState();
+      if (state.isProcessing) {
+        console.log('Fulfillment running, skipping maintenance...');
+        return;
+      }
+      await runOrderMaintenance();
+    });
+    console.log(`\nScheduled order maintenance: ${maintenanceInterval}`);
+  }
+
   console.log(`\nScheduled fulfillment: ${checkInterval}`);
   console.log('Scheduled confirmations: every 30 seconds');
   console.log('Press Ctrl+C to stop\n');
@@ -255,11 +349,15 @@ process.on('SIGINT', async () => {
   
   // Log final stats
   console.log('\nFinal Statistics:');
-  console.log(`- Runs: ${stats.runs}`);
-  console.log(`- Processed: ${stats.totalProcessed}`);
-  console.log(`- Successful: ${stats.successful}`);
-  console.log(`- Failed: ${stats.failed}`);
-  
+  console.log('Fulfillment:');
+  console.log(`  - Runs: ${stats.runs}`);
+  console.log(`  - Processed: ${stats.totalProcessed}`);
+  console.log(`  - Successful: ${stats.successful}`);
+  console.log(`  - Failed: ${stats.failed}`);
+  console.log('Order Maintenance:');
+  console.log(`  - Runs: ${stats.maintenanceRuns}`);
+  console.log(`  - Orders Created: ${stats.ordersCreated}`);
+
   const state = await processor.getState();
   console.log(`- Active Txs: ${state.mempool.activeTransactions}`);
   console.log(`- Pre-broadcast Failures: ${state.failures.preBroadcast}`);

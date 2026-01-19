@@ -467,6 +467,151 @@ export class CounterpartyService {
   }
 
   /**
+   * Compose a DEX order transaction
+   */
+  async composeOrder(
+    source: string,
+    giveAsset: string,
+    giveQuantity: number,
+    getAsset: string,
+    getQuantity: bigint,
+    expiration: number,
+    satPerVbyte: number
+  ): Promise<string> {
+    const params = new URLSearchParams({
+      give_asset: giveAsset,
+      give_quantity: giveQuantity.toString(),
+      get_asset: getAsset,
+      get_quantity: getQuantity.toString(),
+      expiration: expiration.toString(),
+      fee_required: '0',
+      sat_per_vbyte: satPerVbyte.toString(),
+      exclude_utxos_with_balances: 'true',
+      allow_unconfirmed_inputs: 'true'
+    });
+
+    const response = await this.request<ComposeResponse>(
+      `/addresses/${source}/compose/order?${params.toString()}`,
+      'GET'
+    );
+
+    return response.rawtransaction;
+  }
+
+  /**
+   * Get XCPFOLIO.* subasset balances for an address
+   * Returns only assets with balance > 0 (meaning order expired or never listed)
+   * Handles pagination for large portfolios (1000+ assets)
+   */
+  async getXcpfolioBalances(address: string): Promise<Map<string, number>> {
+    const balances = new Map<string, number>();
+    const limit = 1000;
+    let offset = 0;
+    let hasMore = true;
+
+    while (hasMore) {
+      const params = new URLSearchParams({
+        limit: limit.toString(),
+        offset: offset.toString(),
+        verbose: 'true'
+      });
+
+      const data = await this.request<any[]>(`/addresses/${address}/balances?${params}`);
+
+      for (const b of (data || [])) {
+        // Only care about XCPFOLIO.* subassets with balance > 0
+        if (b.asset_longname?.startsWith(ASSET_CONFIG.XCPFOLIO_PREFIX) && b.quantity > 0) {
+          const name = b.asset_longname.replace(ASSET_CONFIG.XCPFOLIO_PREFIX, '');
+          balances.set(name, b.quantity);
+        }
+      }
+
+      // Check if we should continue
+      if (!data || data.length < limit) {
+        hasMore = false;
+      } else {
+        offset += limit;
+      }
+    }
+
+    return balances;
+  }
+
+  /**
+   * Get all open orders (confirmed + unconfirmed) for an address
+   * Returns Set of asset names that already have orders
+   * Handles pagination for large portfolios (1000+ orders)
+   */
+  async getOpenOrderAssets(address: string): Promise<Set<string>> {
+    const assets = new Set<string>();
+    const limit = 1000;
+    let offset = 0;
+    let hasMore = true;
+
+    while (hasMore) {
+      const params = new URLSearchParams({
+        status: 'open',
+        verbose: 'true',
+        show_unconfirmed: 'true', // Include unconfirmed!
+        limit: limit.toString(),
+        offset: offset.toString()
+      });
+
+      const orders = await this.request<Order[]>(`/addresses/${address}/orders?${params}`);
+
+      for (const order of (orders || [])) {
+        const assetLongname = order.give_asset_info?.asset_longname;
+        if (assetLongname?.startsWith(ASSET_CONFIG.XCPFOLIO_PREFIX)) {
+          const name = assetLongname.replace(ASSET_CONFIG.XCPFOLIO_PREFIX, '');
+          assets.add(name);
+        }
+      }
+
+      // Check if we should continue
+      if (!orders || orders.length < limit) {
+        hasMore = false;
+      } else {
+        offset += limit;
+      }
+    }
+
+    return assets;
+  }
+
+  /**
+   * Get unconfirmed ORDER events from mempool for our address
+   * This catches orders that are broadcast but not yet in the orders table
+   */
+  async getMempoolOrderAssets(address: string): Promise<Set<string>> {
+    const assets = new Set<string>();
+
+    try {
+      const params = new URLSearchParams({
+        addresses: address,
+        verbose: 'true'
+      });
+
+      const events = await this.request<any[]>(`/addresses/mempool?${params}`);
+
+      for (const event of (events || [])) {
+        // Look for ORDER or OPEN_ORDER events
+        if (event.event === 'OPEN_ORDER' || event.event === 'ORDER') {
+          const assetLongname = event.params?.give_asset_info?.asset_longname || event.params?.give_asset;
+          if (assetLongname?.startsWith(ASSET_CONFIG.XCPFOLIO_PREFIX)) {
+            const name = assetLongname.replace(ASSET_CONFIG.XCPFOLIO_PREFIX, '');
+            assets.add(name);
+            console.log(`[Mempool] Found pending order for ${name}`);
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error fetching mempool orders:', error);
+    }
+
+    return assets;
+  }
+
+  /**
    * Check if a transfer is already in mempool or confirmed
    */
   async hasUnconfirmedTransfer(asset: string, destination: string, source: string): Promise<boolean> {
