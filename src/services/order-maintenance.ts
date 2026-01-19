@@ -390,8 +390,8 @@ export class OrderMaintenanceService {
 
           // CRITICAL: Check if order actually made it to mempool despite the error
           // This handles cases where broadcast succeeds but we get a network error on response
-          console.log('  Checking mempool after error...');
-          await this.sleep(2000); // Give it a moment to propagate
+          console.log('  Checking mempool after error (waiting 15s for propagation)...');
+          await this.sleep(15000); // Give it time to propagate
           const mempoolAfterError = await this.counterparty.getMempoolOrderAssets(this.config.xcpfolioAddress);
 
           if (mempoolAfterError.has(asset)) {
