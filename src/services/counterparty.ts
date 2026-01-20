@@ -487,8 +487,8 @@ export class CounterpartyService {
       expiration: expiration.toString(),
       fee_required: '0',
       sat_per_vbyte: satPerVbyte.toString(),
-      exclude_utxos_with_balances: 'true',
-      allow_unconfirmed_inputs: 'true'
+      exclude_utxos_with_balances: 'true'
+      // Note: removed allow_unconfirmed_inputs to avoid stale UTXO selection
     });
 
     // If inputs_set provided, use those specific UTXOs

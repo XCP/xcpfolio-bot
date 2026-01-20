@@ -178,11 +178,6 @@ export class OrderMaintenanceService {
       const feeRate = await this.bitcoin.getActualMinimumFeeRate();
       console.log(`Fee rate: ${feeRate.toFixed(2)} sat/vB`);
 
-      // 4b. Fetch UTXOs from mempool.space to avoid Counterparty stale UTXO issue
-      const utxos = await this.bitcoin.fetchUTXOs(this.config.xcpfolioAddress);
-      const inputsSet = this.bitcoin.formatInputsSet(utxos);
-      console.log(`UTXOs available: ${utxos.length}`);
-
       // 5. Get XCPFOLIO.* balances (assets that need to be listed)
       const balances = await this.counterparty.getXcpfolioBalances(this.config.xcpfolioAddress);
       console.log(`Assets with balance: ${balances.size}`);
@@ -309,8 +304,7 @@ export class OrderMaintenanceService {
             ASSET_CONFIG.XCP,
             getQuantity,
             this.config.orderExpiration!,
-            feeRate,
-            inputsSet  // Use our fetched UTXOs to avoid Counterparty stale UTXO issue
+            feeRate
           );
 
           // Sign transaction
