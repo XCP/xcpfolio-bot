@@ -103,8 +103,8 @@ export class OrderMaintenanceService {
   }
 
   /**
-   * Log active orders status (read-only, NO clearing)
-   * Clearing is ONLY done by TTL (2 hours) - never programmatically
+   * Log active orders status (read-only)
+   * Stale orders (>2 hours) are cleared separately via clearStaleActiveOrders()
    */
   private async logActiveOrders(): Promise<void> {
     const activeOrders = await this.stateManager.getActiveOrders();
@@ -112,20 +112,6 @@ export class OrderMaintenanceService {
     if (count > 0) {
       console.log(`[${this.timestamp()}] Active orders in Redis: ${count} (will skip these)`);
     }
-  }
-
-  /**
-   * Calculate backoff delay based on failure count
-   */
-  private getBackoffDelay(failureCount: number): number {
-    if (failureCount < MAINTENANCE_RETRY_STRATEGY.QUICK_ATTEMPTS) {
-      return MAINTENANCE_RETRY_STRATEGY.QUICK_BACKOFF;
-    } else if (failureCount < MAINTENANCE_RETRY_STRATEGY.MODERATE_ATTEMPTS) {
-      return MAINTENANCE_RETRY_STRATEGY.MODERATE_BACKOFF;
-    } else if (failureCount < MAINTENANCE_RETRY_STRATEGY.EXTENDED_ATTEMPTS) {
-      return MAINTENANCE_RETRY_STRATEGY.EXTENDED_BACKOFF;
-    }
-    return MAINTENANCE_RETRY_STRATEGY.MAX_BACKOFF;
   }
 
   /**
@@ -151,7 +137,6 @@ export class OrderMaintenanceService {
     const startTime = Date.now();
     const processedThisRun = new Set<string>(); // Track assets we've broadcast in THIS run
     let consecutiveUtxoFailures = 0;
-    let lastFailedUtxo: string | null = null;
 
     try {
       console.log(`\n[${this.timestamp()}] Order Maintenance starting...`);
@@ -163,8 +148,12 @@ export class OrderMaintenanceService {
       // Record run start
       await this.stateManager.setLastRun();
 
-      // 1. Log active orders (read-only - no clearing!)
+      // 1. Log active orders and clear stale ones (older than 2 hours)
       await this.logActiveOrders();
+      const staleCleared = await this.stateManager.clearStaleActiveOrders();
+      if (staleCleared.length > 0) {
+        console.log(`[${this.timestamp()}] Cleared ${staleCleared.length} stale active orders: ${staleCleared.join(', ')}`);
+      }
 
       // 3. Check mempool capacity - bail if at limit
       const unconfirmedCount = await this.bitcoin.getUnconfirmedTxCount(this.config.xcpfolioAddress);
@@ -251,7 +240,6 @@ export class OrderMaintenanceService {
 
       // 8. Process orders sequentially (no in-run retries - failures handled by next cron run)
       let currentUnconfirmed = unconfirmedCount;
-      let processedCount = 0;
 
       // DEFENSE IN DEPTH: Track pending orders in a mutable Set
       // This gets updated as we process, so we don't need to re-query mempool for each asset
@@ -310,7 +298,7 @@ export class OrderMaintenanceService {
           const getQuantity = BigInt(Math.round(price * 100000000)); // XCP has 8 decimals
 
           // Use a specific confirmed UTXO to avoid Counterparty stale UTXO selection
-          const utxoToUse = confirmedUtxos[utxoIndex % confirmedUtxos.length];
+          const utxoToUse = confirmedUtxos[utxoIndex];
           const inputsSet = utxoToUse ? `${utxoToUse.txid}:${utxoToUse.vout}` : undefined;
 
           const rawTx = await this.counterparty.composeOrder(
@@ -353,7 +341,6 @@ export class OrderMaintenanceService {
 
           currentUnconfirmed++;
           utxoIndex++; // Move to next UTXO for next order
-          await this.stateManager.clearFailure(asset);
 
           return { asset, price, success: true, txid };
 
@@ -382,16 +369,13 @@ export class OrderMaintenanceService {
             return { asset, price, success: false, error: msg };
           }
 
-          // Track consecutive UTXO failures (same stale UTXO = pending tx blocking)
-          const utxoMatch = msg.match(/UTXO not found.*?([a-f0-9]{64}:\d+)/i);
-          if (utxoMatch) {
-            const failedUtxo = utxoMatch[1];
-            if (failedUtxo === lastFailedUtxo) {
-              consecutiveUtxoFailures++;
-            } else {
-              consecutiveUtxoFailures = 1;
-              lastFailedUtxo = failedUtxo;
-            }
+          // Check for UTXO-related errors - move to next UTXO
+          const isUtxoError = msg.toLowerCase().includes('utxo') &&
+                              (msg.toLowerCase().includes('not found') || msg.toLowerCase().includes('spent'));
+          if (isUtxoError) {
+            utxoIndex++; // Try next UTXO for next asset
+            consecutiveUtxoFailures++;
+            console.log(`  Moving to next UTXO (index ${utxoIndex}), consecutive failures: ${consecutiveUtxoFailures}`);
           }
 
           return { asset, price, success: false, error: msg };
@@ -404,29 +388,29 @@ export class OrderMaintenanceService {
         const result = await processAsset(asset, price, i, toProcess.length);
 
         if (result === null) {
-          // Check why we got null - mempool full or out of UTXOs
+          // Check if this is a stop condition (mempool full, no UTXOs) or just a skip (duplicate)
           if (currentUnconfirmed >= this.config.maxMempoolTxs!) {
             console.log(`Stopping: mempool at capacity`);
+            break;
           } else if (utxoIndex >= confirmedUtxos.length) {
             console.log(`Stopping: no more confirmed UTXOs (used ${utxoIndex})`);
+            break;
           }
-          break;
+          // Otherwise it was a skip (duplicate detected), continue to next asset
+          continue;
         }
 
         if (result) {
           results.push(result);
-          if (result.success) {
-            processedCount++;
-          }
 
           // Check if we should bail on insufficient funds
           if (!result.success && this.isInsufficientFundsError(result.error || '')) {
             break;
           }
 
-          // Bail if same UTXO keeps failing (pending tx needs to confirm)
+          // Bail if too many UTXO failures (likely all UTXOs are stale/spent)
           if (consecutiveUtxoFailures >= 3) {
-            console.log(`\n⏳ Same UTXO failed ${consecutiveUtxoFailures}x - pending tx blocking. Waiting for confirmation.`);
+            console.log(`\n⏳ ${consecutiveUtxoFailures} UTXO failures - likely stale UTXOs. Waiting for confirmations.`);
             break;
           }
         }
