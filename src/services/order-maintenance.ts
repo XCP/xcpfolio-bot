@@ -178,6 +178,12 @@ export class OrderMaintenanceService {
       const feeRate = await this.bitcoin.getActualMinimumFeeRate();
       console.log(`Fee rate: ${feeRate.toFixed(2)} sat/vB`);
 
+      // 4b. Get confirmed UTXOs to use for composing (avoids Counterparty stale UTXO issue)
+      const allUtxos = await this.bitcoin.fetchUTXOs(this.config.xcpfolioAddress);
+      const confirmedUtxos = allUtxos.filter(u => u.status?.confirmed === true);
+      console.log(`UTXOs: ${confirmedUtxos.length} confirmed, ${allUtxos.length - confirmedUtxos.length} unconfirmed`);
+      let utxoIndex = 0; // Track which UTXO to use next
+
       // 5. Get XCPFOLIO.* balances (assets that need to be listed)
       const balances = await this.counterparty.getXcpfolioBalances(this.config.xcpfolioAddress);
       console.log(`Assets with balance: ${balances.size}`);
@@ -267,6 +273,12 @@ export class OrderMaintenanceService {
           return null; // Signal to stop
         }
 
+        // Check if we've used all confirmed UTXOs
+        if (utxoIndex >= confirmedUtxos.length) {
+          console.log('  ⚠ No more confirmed UTXOs available - stopping');
+          return null; // Signal to stop
+        }
+
         // DUPLICATE PREVENTION LAYER 1: Check local tracking for this run
         if (processedThisRun.has(asset)) {
           console.log('  ⏭ Already processed in this run - skipping');
@@ -297,6 +309,10 @@ export class OrderMaintenanceService {
           console.log('  Composing...');
           const getQuantity = BigInt(Math.round(price * 100000000)); // XCP has 8 decimals
 
+          // Use a specific confirmed UTXO to avoid Counterparty stale UTXO selection
+          const utxoToUse = confirmedUtxos[utxoIndex % confirmedUtxos.length];
+          const inputsSet = utxoToUse ? `${utxoToUse.txid}:${utxoToUse.vout}` : undefined;
+
           const rawTx = await this.counterparty.composeOrder(
             this.config.xcpfolioAddress,
             `${ASSET_CONFIG.XCPFOLIO_PREFIX}${asset}`,
@@ -304,7 +320,8 @@ export class OrderMaintenanceService {
             ASSET_CONFIG.XCP,
             getQuantity,
             this.config.orderExpiration!,
-            feeRate
+            feeRate,
+            inputsSet
           );
 
           // Sign transaction
@@ -335,6 +352,7 @@ export class OrderMaintenanceService {
           }
 
           currentUnconfirmed++;
+          utxoIndex++; // Move to next UTXO for next order
           await this.stateManager.clearFailure(asset);
 
           return { asset, price, success: true, txid };
@@ -385,9 +403,13 @@ export class OrderMaintenanceService {
         const { asset, price } = toProcess[i];
         const result = await processAsset(asset, price, i, toProcess.length);
 
-        if (result === null && currentUnconfirmed >= this.config.maxMempoolTxs!) {
-          // Mempool full - stop processing
-          console.log(`Stopping: mempool at capacity`);
+        if (result === null) {
+          // Check why we got null - mempool full or out of UTXOs
+          if (currentUnconfirmed >= this.config.maxMempoolTxs!) {
+            console.log(`Stopping: mempool at capacity`);
+          } else if (utxoIndex >= confirmedUtxos.length) {
+            console.log(`Stopping: no more confirmed UTXOs (used ${utxoIndex})`);
+          }
           break;
         }
 
