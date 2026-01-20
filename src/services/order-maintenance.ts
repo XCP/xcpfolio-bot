@@ -438,10 +438,14 @@ export class OrderMaintenanceService {
    */
   private isInsufficientFundsError(msg: string): boolean {
     const lower = msg.toLowerCase();
+    // "UTXO not found" is a stale UTXO issue, not insufficient funds
+    if (lower.includes('utxo') && lower.includes('not found')) {
+      return false;
+    }
     return lower.includes('insufficient') ||
            lower.includes('not enough') ||
            lower.includes('balance') ||
-           lower.includes('utxo') && lower.includes('found');
+           lower.includes('no utxos');
   }
 
   /**
