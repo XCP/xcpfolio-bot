@@ -150,6 +150,8 @@ export class OrderMaintenanceService {
     const results: MaintenanceResult[] = [];
     const startTime = Date.now();
     const processedThisRun = new Set<string>(); // Track assets we've broadcast in THIS run
+    let consecutiveUtxoFailures = 0;
+    let lastFailedUtxo: string | null = null;
 
     try {
       console.log(`\n[${this.timestamp()}] Order Maintenance starting...`);
@@ -362,6 +364,18 @@ export class OrderMaintenanceService {
             return { asset, price, success: false, error: msg };
           }
 
+          // Track consecutive UTXO failures (same stale UTXO = pending tx blocking)
+          const utxoMatch = msg.match(/UTXO not found.*?([a-f0-9]{64}:\d+)/i);
+          if (utxoMatch) {
+            const failedUtxo = utxoMatch[1];
+            if (failedUtxo === lastFailedUtxo) {
+              consecutiveUtxoFailures++;
+            } else {
+              consecutiveUtxoFailures = 1;
+              lastFailedUtxo = failedUtxo;
+            }
+          }
+
           return { asset, price, success: false, error: msg };
         }
       };
@@ -385,6 +399,12 @@ export class OrderMaintenanceService {
 
           // Check if we should bail on insufficient funds
           if (!result.success && this.isInsufficientFundsError(result.error || '')) {
+            break;
+          }
+
+          // Bail if same UTXO keeps failing (pending tx needs to confirm)
+          if (consecutiveUtxoFailures >= 3) {
+            console.log(`\n⏳ Same UTXO failed ${consecutiveUtxoFailures}x - pending tx blocking. Waiting for confirmation.`);
             break;
           }
         }
