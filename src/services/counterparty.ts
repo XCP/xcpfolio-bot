@@ -476,7 +476,8 @@ export class CounterpartyService {
     getAsset: string,
     getQuantity: bigint,
     expiration: number,
-    satPerVbyte: number
+    satPerVbyte: number,
+    inputsSet?: string  // Optional: specify UTXOs to use (format: "txid:vout,txid:vout")
   ): Promise<string> {
     const params = new URLSearchParams({
       give_asset: giveAsset,
@@ -489,6 +490,11 @@ export class CounterpartyService {
       exclude_utxos_with_balances: 'true',
       allow_unconfirmed_inputs: 'true'
     });
+
+    // If inputs_set provided, use those specific UTXOs
+    if (inputsSet) {
+      params.set('inputs_set', inputsSet);
+    }
 
     const response = await this.request<ComposeResponse>(
       `/addresses/${source}/compose/order?${params.toString()}`,
