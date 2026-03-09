@@ -1,7 +1,7 @@
 import axios from 'axios';
 import { Order, Issuance, Block } from '../types';
 import { UTXO } from './bitcoin';
-import { API_CONFIG, ASSET_CONFIG, STATUS } from '../constants';
+import { API_CONFIG, API_RETRY, ASSET_CONFIG, STATUS } from '../constants';
 
 const API_BASE = process.env.COUNTERPARTY_API || API_CONFIG.COUNTERPARTY.DEFAULT_URL;
 
@@ -64,52 +64,77 @@ export class CounterpartyService {
   }
 
   /**
-   * Make a request to the Counterparty API
+   * Make a request to the Counterparty API with retry for transient errors
    */
   private async request<T>(
     endpoint: string,
     method: 'GET' | 'POST' = 'GET',
     data?: any
   ): Promise<T> {
-    try {
-      const url = `${this.apiBase}${endpoint}`;
-      const config: any = {
-        method,
-        url,
-        headers: {
-          'Content-Type': 'application/json',
-        }
-      };
-
-      if (method === 'POST' && data) {
-        config.data = data;
+    const url = `${this.apiBase}${endpoint}`;
+    const config: any = {
+      method,
+      url,
+      headers: {
+        'Content-Type': 'application/json',
       }
+    };
 
-      console.log(`[Counterparty API] ${method} ${url}`);
-      if (data) {
-        console.log('[Counterparty API] Request body:', JSON.stringify(data, null, 2));
-      }
-
-      const response = await axios(config);
-      
-      if (response.data.error) {
-        throw new Error(response.data.error.message || 'API error');
-      }
-
-      return response.data.result;
-    } catch (error) {
-      if (axios.isAxiosError(error)) {
-        console.error('[Counterparty API] Error response:', {
-          status: error.response?.status,
-          statusText: error.response?.statusText,
-          data: error.response?.data,
-          url: error.config?.url
-        });
-        const errorMessage = error.response?.data?.error?.message || error.message;
-        throw new Error(`Counterparty API error: ${errorMessage}`);
-      }
-      throw error;
+    if (method === 'POST' && data) {
+      config.data = data;
     }
+
+    let lastError: Error | undefined;
+
+    for (let attempt = 0; attempt <= API_RETRY.MAX_RETRIES; attempt++) {
+      try {
+        if (attempt === 0) {
+          console.log(`[Counterparty API] ${method} ${url}`);
+          if (data) {
+            console.log('[Counterparty API] Request body:', JSON.stringify(data, null, 2));
+          }
+        } else {
+          console.log(`[Counterparty API] Retry ${attempt}/${API_RETRY.MAX_RETRIES} ${method} ${url}`);
+        }
+
+        const response = await axios(config);
+
+        if (response.data.error) {
+          throw new Error(response.data.error.message || 'API error');
+        }
+
+        return response.data.result;
+      } catch (error) {
+        if (axios.isAxiosError(error)) {
+          const status = error.response?.status;
+
+          // Retry on transient HTTP errors
+          if (status && (API_RETRY.RETRYABLE_STATUS_CODES as readonly number[]).includes(status) && attempt < API_RETRY.MAX_RETRIES) {
+            const delay = Math.min(
+              API_RETRY.BASE_DELAY * Math.pow(2, attempt),
+              API_RETRY.MAX_DELAY
+            );
+            console.warn(`[Counterparty API] ${status} ${error.response?.statusText} - retrying in ${(delay / 1000).toFixed(1)}s...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            lastError = new Error(`Counterparty API error: ${error.response?.data?.error?.message || error.message}`);
+            continue;
+          }
+
+          console.error('[Counterparty API] Error response:', {
+            status,
+            statusText: error.response?.statusText,
+            data: error.response?.data,
+            url: error.config?.url
+          });
+          const errorMessage = error.response?.data?.error?.message || error.message;
+          throw new Error(`Counterparty API error: ${errorMessage}`);
+        }
+        throw error;
+      }
+    }
+
+    // All retries exhausted
+    throw lastError || new Error('Counterparty API error: max retries exceeded');
   }
 
   /**

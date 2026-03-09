@@ -107,6 +107,14 @@ export const TX_LIMITS = {
   ESTIMATED_TX_VSIZE: 250,          // Estimated vsize for fee calculations (~250 vbytes for typical transfer)
 } as const;
 
+// API retry configuration (for transient HTTP errors: 502, 503, 504, 429)
+export const API_RETRY = {
+  MAX_RETRIES: 3,
+  BASE_DELAY: 2000,       // 2 seconds initial delay
+  MAX_DELAY: 15000,       // 15 seconds max delay
+  RETRYABLE_STATUS_CODES: [502, 503, 504, 429],
+} as const;
+
 // API configuration
 export const API_CONFIG = {
   COUNTERPARTY: {
