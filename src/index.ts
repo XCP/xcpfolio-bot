@@ -53,7 +53,7 @@ const orderMaintenance = new OrderMaintenanceService({
   dryRun: process.env.DRY_RUN === 'true',
   maxMempoolTxs: process.env.MAX_MEMPOOL_TXS ? parseInt(process.env.MAX_MEMPOOL_TXS) : 25,
   orderExpiration: process.env.ORDER_EXPIRATION ? parseInt(process.env.ORDER_EXPIRATION) : 8064,
-  waitAfterBroadcast: process.env.WAIT_AFTER_BROADCAST ? parseInt(process.env.WAIT_AFTER_BROADCAST) : 10000,
+  waitAfterBroadcast: process.env.WAIT_AFTER_BROADCAST ? parseInt(process.env.WAIT_AFTER_BROADCAST) : 2000,
 });
 
 // Load prices for order maintenance

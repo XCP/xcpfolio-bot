@@ -32,10 +32,9 @@ module.exports = async (req, res) => {
     const confirmationMonitor = new ConfirmationMonitor(processor.orderHistory);
     await confirmationMonitor.checkConfirmations();
 
-    // Order maintenance: run at top of hour (minute = 0) or if forced via env
-    const now = new Date();
-    const runMaintenance = process.env.ORDER_MAINTENANCE_ENABLED !== 'false' &&
-                          (now.getMinutes() === 0 || process.env.FORCE_MAINTENANCE === 'true');
+    // Order maintenance: run every invocation (duplicate prevention is handled by
+    // distributed lock + 3-layer per-asset checks in OrderMaintenanceService)
+    const runMaintenance = process.env.ORDER_MAINTENANCE_ENABLED !== 'false';
 
     let maintenanceResults = [];
     if (runMaintenance) {
@@ -50,7 +49,7 @@ module.exports = async (req, res) => {
           dryRun: process.env.DRY_RUN === 'true',
           maxMempoolTxs: parseInt(process.env.MAX_MEMPOOL_TXS || '25'),
           orderExpiration: parseInt(process.env.ORDER_EXPIRATION || '8064'),
-          waitAfterBroadcast: parseInt(process.env.WAIT_AFTER_BROADCAST || '10000')
+          waitAfterBroadcast: parseInt(process.env.WAIT_AFTER_BROADCAST || '2000')
         };
 
         const maintenance = new OrderMaintenanceService(maintenanceConfig);

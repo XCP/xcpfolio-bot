@@ -65,7 +65,7 @@ export class OrderMaintenanceService {
       ...config,
       maxMempoolTxs: config.maxMempoolTxs || TX_LIMITS.MAX_MEMPOOL_TXS,
       orderExpiration: config.orderExpiration || 8064, // ~8 weeks
-      waitAfterBroadcast: config.waitAfterBroadcast || 10000,
+      waitAfterBroadcast: config.waitAfterBroadcast || 2000,
     };
 
     this.counterparty = new CounterpartyService();
@@ -125,8 +125,8 @@ export class OrderMaintenanceService {
       return [];
     }
 
-    // Try to acquire distributed lock (5 minute TTL)
-    const lockAcquired = await this.stateManager.acquireLock(300);
+    // Try to acquire distributed lock (75s TTL, slightly above Vercel's 60s function limit)
+    const lockAcquired = await this.stateManager.acquireLock(75);
     if (!lockAcquired) {
       console.log(`[${this.timestamp()}] Another instance is running (distributed lock), skipping`);
       return [];
@@ -167,11 +167,14 @@ export class OrderMaintenanceService {
       const feeRate = await this.bitcoin.getActualMinimumFeeRate();
       console.log(`Fee rate: ${feeRate.toFixed(2)} sat/vB`);
 
-      // 4b. Get confirmed UTXOs to use for composing (avoids Counterparty stale UTXO issue)
-      const allUtxos = await this.bitcoin.fetchUTXOs(this.config.xcpfolioAddress);
-      const confirmedUtxos = allUtxos.filter(u => u.status?.confirmed === true);
-      console.log(`UTXOs: ${confirmedUtxos.length} confirmed, ${allUtxos.length - confirmedUtxos.length} unconfirmed`);
-      let utxoIndex = 0; // Track which UTXO to use next
+      // 4b. Get UTXOs to use for composing (avoids Counterparty stale UTXO issue)
+      // We pass specific UTXOs via inputs_set since Counterparty's UTXO view lags.
+      // After each broadcast, we re-fetch from mempool.space (which sees unconfirmed
+      // UTXOs immediately) to find the change output for UTXO chaining.
+      let availableUtxos = await this.bitcoin.fetchUTXOs(this.config.xcpfolioAddress);
+      console.log(`UTXOs: ${availableUtxos.length} (${availableUtxos.filter(u => u.status?.confirmed).length} confirmed, ${availableUtxos.filter(u => !u.status?.confirmed).length} unconfirmed)`);
+      // Track txids we've already used as inputs (spent in this run)
+      const spentUtxoKeys = new Set<string>();
 
       // 5. Get XCPFOLIO.* balances (assets that need to be listed)
       const balances = await this.counterparty.getXcpfolioBalances(this.config.xcpfolioAddress);
@@ -261,9 +264,10 @@ export class OrderMaintenanceService {
           return null; // Signal to stop
         }
 
-        // Check if we've used all confirmed UTXOs
-        if (utxoIndex >= confirmedUtxos.length) {
-          console.log('  ⚠ No more confirmed UTXOs available - stopping');
+        // Check if we have any usable UTXOs (not already spent this run)
+        const nextUtxo = availableUtxos.find(u => !spentUtxoKeys.has(`${u.txid}:${u.vout}`));
+        if (!nextUtxo) {
+          console.log('  ⚠ No more UTXOs available - stopping');
           return null; // Signal to stop
         }
 
@@ -292,14 +296,13 @@ export class OrderMaintenanceService {
         pendingOrdersSet.add(asset);
         await this.stateManager.markOrderActive(asset, 'pending', price);
 
+        // Capture UTXO key before try/catch so it's accessible in catch for error handling
+        const inputsSet = `${nextUtxo.txid}:${nextUtxo.vout}`;
+
         try {
           // Compose order
           console.log('  Composing...');
           const getQuantity = BigInt(Math.round(price * 100000000)); // XCP has 8 decimals
-
-          // Use a specific confirmed UTXO to avoid Counterparty stale UTXO selection
-          const utxoToUse = confirmedUtxos[utxoIndex];
-          const inputsSet = utxoToUse ? `${utxoToUse.txid}:${utxoToUse.vout}` : undefined;
 
           const rawTx = await this.counterparty.composeOrder(
             this.config.xcpfolioAddress,
@@ -329,18 +332,16 @@ export class OrderMaintenanceService {
           // Update Redis state with actual txid
           await this.stateManager.markOrderActive(asset, txid, price);
 
-          // Post-broadcast verification (optional, adds latency)
-          console.log('  Verifying...');
-          await this.sleep(MAINTENANCE_RETRY_STRATEGY.MEMPOOL_CHECK_DELAY);
-          const pendingCheck = await this.counterparty.getMempoolOrderAssets(this.config.xcpfolioAddress);
-          if (pendingCheck.has(asset)) {
-            console.log('  ✅ Verified in mempool');
-          } else {
-            console.log('  ⚠ Warning: not yet in mempool (may still propagate)');
-          }
-
+          // Mark the input UTXO as spent and re-fetch to find change output for chaining
+          spentUtxoKeys.add(inputsSet);
           currentUnconfirmed++;
-          utxoIndex++; // Move to next UTXO for next order
+
+          // Re-fetch UTXOs from mempool.space (sees unconfirmed immediately)
+          // This picks up the change output from the tx we just broadcast
+          await this.sleep(MAINTENANCE_RETRY_STRATEGY.MEMPOOL_CHECK_DELAY);
+          availableUtxos = await this.bitcoin.fetchUTXOs(this.config.xcpfolioAddress);
+          const newUtxoCount = availableUtxos.filter(u => !spentUtxoKeys.has(`${u.txid}:${u.vout}`)).length;
+          console.log(`  ✅ Broadcast OK. UTXOs available for next order: ${newUtxoCount}`);
 
           return { asset, price, success: true, txid };
 
@@ -355,7 +356,11 @@ export class OrderMaintenanceService {
 
           if (mempoolAfterError.has(asset)) {
             console.log('  ✅ Order found in mempool despite error - success');
+            // UTXO was spent by this tx even though we got an error
+            spentUtxoKeys.add(inputsSet);
             currentUnconfirmed++;
+            // Re-fetch UTXOs so we can chain the next order off the change
+            availableUtxos = await this.bitcoin.fetchUTXOs(this.config.xcpfolioAddress);
             return { asset, price, success: true, txid: 'found-in-mempool' };
           }
 
@@ -369,13 +374,13 @@ export class OrderMaintenanceService {
             return { asset, price, success: false, error: msg };
           }
 
-          // Check for UTXO-related errors - move to next UTXO
+          // Check for UTXO-related errors - mark this UTXO as spent
           const isUtxoError = msg.toLowerCase().includes('utxo') &&
                               (msg.toLowerCase().includes('not found') || msg.toLowerCase().includes('spent'));
           if (isUtxoError) {
-            utxoIndex++; // Try next UTXO for next asset
+            spentUtxoKeys.add(inputsSet); // Don't reuse this UTXO
             consecutiveUtxoFailures++;
-            console.log(`  Moving to next UTXO (index ${utxoIndex}), consecutive failures: ${consecutiveUtxoFailures}`);
+            console.log(`  Marked UTXO spent, consecutive failures: ${consecutiveUtxoFailures}`);
           }
 
           return { asset, price, success: false, error: msg };
@@ -392,8 +397,8 @@ export class OrderMaintenanceService {
           if (currentUnconfirmed >= this.config.maxMempoolTxs!) {
             console.log(`Stopping: mempool at capacity`);
             break;
-          } else if (utxoIndex >= confirmedUtxos.length) {
-            console.log(`Stopping: no more confirmed UTXOs (used ${utxoIndex})`);
+          } else if (!availableUtxos.some(u => !spentUtxoKeys.has(`${u.txid}:${u.vout}`))) {
+            console.log(`Stopping: no more UTXOs available (${spentUtxoKeys.size} spent)`);
             break;
           }
           // Otherwise it was a skip (duplicate detected), continue to next asset
