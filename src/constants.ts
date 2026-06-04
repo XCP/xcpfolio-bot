@@ -105,6 +105,7 @@ export const TX_LIMITS = {
   MAX_TOTAL_FEE_SATS: 10000,       // 0.0001 BTC = 10,000 sats hard ceiling per transaction
   MAX_FEE_RATE_FOR_NEW_TX: 100,    // Max 100 sat/vB for new transactions (wait if higher)
   ESTIMATED_TX_VSIZE: 250,          // Estimated vsize for fee calculations (~250 vbytes for typical transfer)
+  MIN_FEE_RATE_FLOOR: 0.1,         // Hard floor for maintenance orders (sat/vB) - sub-1 OK when mempool empty
 } as const;
 
 // API retry configuration (for transient HTTP errors: 502, 503, 504, 429)

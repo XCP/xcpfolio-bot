@@ -48,7 +48,7 @@ module.exports = async (req, res) => {
           network: process.env.NETWORK || 'mainnet',
           dryRun: process.env.DRY_RUN === 'true',
           maxMempoolTxs: parseInt(process.env.MAX_MEMPOOL_TXS || '25'),
-          orderExpiration: parseInt(process.env.ORDER_EXPIRATION || '8064'),
+          orderExpiration: parseInt(process.env.ORDER_EXPIRATION || '0'), // 0 = indefinite
           waitAfterBroadcast: parseInt(process.env.WAIT_AFTER_BROADCAST || '2000')
         };
 

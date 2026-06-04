@@ -10,7 +10,7 @@ export interface OrderMaintenanceConfig {
   network?: 'mainnet' | 'testnet';
   dryRun?: boolean;
   maxMempoolTxs?: number;
-  orderExpiration?: number; // blocks (~8 weeks = 8064)
+  orderExpiration?: number; // blocks; 0 = indefinite (never expires, Counterparty v11.1.0+)
   waitAfterBroadcast?: number; // ms to wait between broadcasts
   pricesPath?: string; // Path to prices JSON
 }
@@ -64,7 +64,9 @@ export class OrderMaintenanceService {
     this.config = {
       ...config,
       maxMempoolTxs: config.maxMempoolTxs || TX_LIMITS.MAX_MEMPOOL_TXS,
-      orderExpiration: config.orderExpiration || 8064, // ~8 weeks
+      // 0 = indefinite orders (Counterparty v11.1.0+): never expire, so re-listing
+      // only happens for genuinely unsold/new assets. Use ?? so an explicit 0 is honored.
+      orderExpiration: config.orderExpiration ?? 0,
       waitAfterBroadcast: config.waitAfterBroadcast || 2000,
     };
 

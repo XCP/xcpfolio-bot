@@ -4,7 +4,7 @@ import { sha256 } from '@noble/hashes/sha256';
 import * as secp256k1 from 'secp256k1';
 import { base58check } from '@scure/base';
 import axios from 'axios';
-import { API_CONFIG, TX_SIZE, TIME } from '../constants';
+import { API_CONFIG, TX_SIZE, TIME, TX_LIMITS } from '../constants';
 
 export interface UTXO {
   txid: string;
@@ -163,35 +163,53 @@ export class BitcoinService {
   }
 
   /**
-   * Get actual minimum fee rate from mempool-blocks endpoint
-   * This returns sub-1 sat/vB rates when mempool is empty
+   * Get actual minimum fee rate from mempool-blocks endpoint.
+   *
+   * Goal: pay as little as possible when the mempool is quiet (sub-1 sat/vB is
+   * fine and intentional), but DON'T fall behind the live mempool floor when
+   * there's a real backlog — otherwise our tx sits at the back of the queue and
+   * can stall or get evicted as the mempool grows.
+   *
+   * Strategy:
+   * - 0 projected blocks (empty mempool): use the hard floor.
+   * - 1 projected block (≤ ~1 block of backlog): use that block's minimum fee
+   *   plus a small buffer — already a near-term inclusion rate.
+   * - 2+ projected blocks (genuine backlog): take the same base estimate but
+   *   floor it at mempool.space's low-priority `economyFee` so we track the live
+   *   floor instead of lowballing the furthest-out projected block.
    */
   async getActualMinimumFeeRate(): Promise<number> {
+    const HARD_FLOOR = TX_LIMITS.MIN_FEE_RATE_FLOOR; // sat/vB
+
     try {
       const response = await axios.get<MempoolBlock[]>(`${MEMPOOL_API}/v1/fees/mempool-blocks`);
       const blocks = response.data;
 
+      // Mempool essentially empty — cheapest possible.
       if (!blocks || blocks.length === 0) {
-        // Mempool essentially empty, use minimum relay fee
-        return 0.15;
+        return HARD_FLOOR;
       }
 
-      // Get the minimum fee from the lowest fee range of the last projected block
+      // Base estimate: lowest fee in the last projected block + 10% buffer.
       // feeRange is [min, 10th, 25th, 50th, 75th, 90th, max]
       const lastBlock = blocks[blocks.length - 1];
       const minFee = lastBlock.feeRange?.[0];
+      let rate = (minFee !== undefined && minFee > 0) ? minFee * 1.1 : HARD_FLOOR;
 
-      if (minFee !== undefined && minFee > 0) {
-        // Add small buffer (10%) to ensure inclusion
-        return Math.max(minFee * 1.1, 0.15);
+      // Backlog of more than one block → the back-of-queue rate above is too low
+      // to keep up. Floor at the live low-priority economyFee.
+      if (blocks.length > 1) {
+        try {
+          const fees = await this.getFeeRates();
+          if (fees.economyFee > 0) {
+            rate = Math.max(rate, fees.economyFee);
+          }
+        } catch {
+          // economyFee unavailable — keep the base estimate
+        }
       }
 
-      // Fallback: if only 1 block projected, mempool is nearly empty
-      if (blocks.length === 1) {
-        return 0.15;
-      }
-
-      return 1; // Default fallback
+      return Math.max(rate, HARD_FLOOR);
     } catch (error) {
       console.warn('Failed to fetch mempool-blocks, using fallback fee rate');
       return 1;
