@@ -156,7 +156,6 @@ export class CounterpartyService {
   ): Promise<Order[]> {
     const params = new URLSearchParams({
       status,
-      show_unconfirmed: 'true',
       verbose: 'true',  // Get asset_info with longnames
       limit: limit.toString(),
       offset: offset.toString(),
@@ -171,10 +170,9 @@ export class CounterpartyService {
    */
   async getOrderMatches(orderHash: string): Promise<any[]> {
     const params = new URLSearchParams({
-      verbose: 'true',
-      show_unconfirmed: 'true'
+      verbose: 'true'
     });
-    
+
     return this.request<any[]>(`/orders/${orderHash}/matches?${params}`);
   }
 
@@ -185,7 +183,6 @@ export class CounterpartyService {
     const params = new URLSearchParams({
       status,
       verbose: 'true',
-      show_unconfirmed: 'true',
       limit: '1000'
     });
     
@@ -228,7 +225,6 @@ export class CounterpartyService {
    */
   async getAssetIssuances(asset: string): Promise<Issuance[]> {
     const params = new URLSearchParams({
-      show_unconfirmed: 'true',
       verbose: 'true',  // Include block_time in response
       limit: '100',
     });
@@ -245,20 +241,19 @@ export class CounterpartyService {
     fromAddress: string
   ): Promise<boolean> {
     try {
-      // Use addresses/events to check ALL events (confirmed + unconfirmed) in one call
+      // addresses/events only covers confirmed events; mempool is checked separately below
       const params = new URLSearchParams({
         addresses: fromAddress,
         event_name: 'ASSET_ISSUANCE',
         verbose: 'true',
-        show_unconfirmed: 'true',
         limit: '500'
       });
-      
+
       const response = await this.request<any[]>(
         `/addresses/events?${params.toString()}`,
         'GET'
       );
-      
+
       // Look for a transfer of this asset to the buyer
       const hasTransfer = response.some(event => {
         const p = event.params;
@@ -266,13 +261,13 @@ export class CounterpartyService {
                p?.quantity === 0 && // Transfer (not issuance)
                p?.transfer_destination === toAddress;
       });
-      
+
       if (hasTransfer) {
-        console.log(`Found transfer: ${asset} -> ${toAddress} (confirmed or pending)`);
+        console.log(`Found transfer: ${asset} -> ${toAddress} (confirmed)`);
         return true;
       }
-      
-      return false;
+
+      return this.hasUnconfirmedTransfer(asset, toAddress, fromAddress);
     } catch (error) {
       console.error('Error checking for asset transfer:', error);
       // Fallback to original method
@@ -407,7 +402,6 @@ export class CounterpartyService {
     limit: number = 100
   ): Promise<Issuance[]> {
     const params = new URLSearchParams({
-      show_unconfirmed: 'true',
       limit: limit.toString(),
       sort: 'block_index:desc',
     });
@@ -569,7 +563,8 @@ export class CounterpartyService {
   }
 
   /**
-   * Get all open orders (confirmed + unconfirmed) for an address
+   * Get all confirmed open orders for an address
+   * (unconfirmed orders come from getMempoolOrderAssets - callers combine both)
    * Returns Set of asset names that already have orders
    * Handles pagination for large portfolios (1000+ orders)
    */
@@ -583,7 +578,6 @@ export class CounterpartyService {
       const params = new URLSearchParams({
         status: 'open',
         verbose: 'true',
-        show_unconfirmed: 'true', // Include unconfirmed!
         limit: limit.toString(),
         offset: offset.toString()
       });
