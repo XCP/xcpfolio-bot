@@ -175,6 +175,19 @@ export class OrderMaintenanceService {
       // UTXOs immediately) to find the change output for UTXO chaining.
       let availableUtxos = await this.bitcoin.fetchUTXOs(this.config.xcpfolioAddress);
       console.log(`UTXOs: ${availableUtxos.length} (${availableUtxos.filter(u => u.status?.confirmed).length} confirmed, ${availableUtxos.filter(u => !u.status?.confirmed).length} unconfirmed)`);
+
+      // The bot spends BTC on every listing and fulfillment tx and stops
+      // silently when the address runs dry - warn well before that happens
+      const totalSats = availableUtxos.reduce((sum, u) => sum + u.value, 0);
+      const lowBalanceThreshold = parseInt(process.env.LOW_BALANCE_THRESHOLD_SATS || '20000');
+      if (totalSats < lowBalanceThreshold) {
+        await NotificationService.sendOnce('low-btc-balance', 6 * 3600, '💸 Bot BTC balance is low', 'warning', {
+          address: this.config.xcpfolioAddress,
+          balanceSats: totalSats,
+          thresholdSats: lowBalanceThreshold,
+          utxos: availableUtxos.length
+        });
+      }
       // Track txids we've already used as inputs (spent in this run)
       const spentUtxoKeys = new Set<string>();
 

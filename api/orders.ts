@@ -182,9 +182,18 @@ async function upsertOrder(order: any): Promise<void> {
     await redis.hset(`${ORDER_KEY_PREFIX}:${order.orderHash}`, cleanOrder);
     await redis.expire(`${ORDER_KEY_PREFIX}:${order.orderHash}`, 60 * 60 * 24 * 7);
 
-    // Update the index
+    // Update the index (tolerate both raw-array and JSON-string forms, like getRecentOrders)
     const indexData = await redis.get(ORDER_INDEX_KEY);
-    let index = indexData ? JSON.parse(indexData as string) : [];
+    let index: string[] = [];
+    if (Array.isArray(indexData)) {
+      index = indexData;
+    } else if (typeof indexData === 'string') {
+      try {
+        index = JSON.parse(indexData);
+      } catch {
+        index = [];
+      }
+    }
     
     // Remove if already exists and add to front
     index = index.filter((h: string) => h !== order.orderHash);

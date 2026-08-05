@@ -2,6 +2,7 @@
 const { FulfillmentProcessor } = require('../dist/services/fulfillment');
 const { ConfirmationMonitor } = require('../dist/services/confirmation-monitor');
 const { OrderMaintenanceService } = require('../dist/services/order-maintenance');
+const { NotificationService } = require('../dist/services/notifications');
 const { loadPrices } = require('../dist/services/prices');
 
 module.exports = async (req, res) => {
@@ -73,6 +74,9 @@ module.exports = async (req, res) => {
     });
   } catch (error) {
     console.error('Error in cron job:', error);
+    await NotificationService.sendOnce('cron-failure', 3600, '🔥 Cron run failed', 'error', {
+      error: error.message
+    });
     res.status(500).json({
       success: false,
       error: error.message,

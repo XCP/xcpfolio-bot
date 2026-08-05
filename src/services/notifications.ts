@@ -3,12 +3,58 @@
  * Handles all external notifications
  */
 
+import { Redis } from '@upstash/redis';
+
 export type NotificationLevel = 'info' | 'success' | 'warning' | 'error' | 'critical';
 
 export class NotificationService {
   private static discordWebhook = process.env.DISCORD_WEBHOOK_URL;
   private static slackWebhook = process.env.SLACK_WEBHOOK_URL;
-  
+  private static redis: Redis | null | undefined;
+
+  private static getRedis(): Redis | null {
+    if (this.redis === undefined) {
+      this.redis = (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN)
+        ? new Redis({
+            url: process.env.KV_REST_API_URL,
+            token: process.env.KV_REST_API_TOKEN,
+          })
+        : null;
+    }
+    return this.redis;
+  }
+
+  /**
+   * Send at most once per cooldown window, deduped across serverless
+   * invocations via Redis. The cron fires every minute, so persistent
+   * failure conditions must not alert 60 times an hour.
+   * If Redis is unavailable the notification is sent anyway.
+   */
+  static async sendOnce(
+    dedupeKey: string,
+    cooldownSeconds: number,
+    message: string,
+    level: NotificationLevel = 'warning',
+    details?: Record<string, any>
+  ): Promise<void> {
+    const redis = this.getRedis();
+    if (redis) {
+      try {
+        const acquired = await redis.set(`xcpfolio:notify:${dedupeKey}`, '1', {
+          nx: true,
+          ex: cooldownSeconds,
+        });
+        if (acquired !== 'OK') {
+          console.log(`[Notify] Suppressed duplicate '${dedupeKey}' (cooldown ${cooldownSeconds}s)`);
+          return;
+        }
+      } catch (error) {
+        console.error('Failed to check notification dedupe key:', error);
+      }
+    }
+    return this.send(message, level, details);
+  }
+
   /**
    * Send notification to configured webhooks
    */

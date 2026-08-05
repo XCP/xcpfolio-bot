@@ -10,7 +10,12 @@ import {
 } from '../mocks/mock-services';
 import { mockFilledOrder, mockBlock } from '../mocks/mock-data';
 
-describe('E2E Tests - Dry Run Mode', () => {
+// These tests exercise the real StateManager/OrderHistory, which require live
+// Redis/KV credentials - skip cleanly when they aren't configured locally
+const hasKV = !!(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN);
+const describeWithKV = hasKV ? describe : describe.skip;
+
+describeWithKV('E2E Tests - Dry Run Mode', () => {
   let processor: FulfillmentProcessor;
   let mockCounterparty: MockCounterpartyService;
   let mockBitcoin: MockBitcoinService;
@@ -103,7 +108,7 @@ describe('E2E Tests - Dry Run Mode', () => {
 
   describe('State Management', () => {
     it('should track processed orders in dry run', async () => {
-      const state = processor.getState();
+      const state = await processor.getState();
       
       expect(state).toBeDefined();
       expect(state.processedOrders).toBeDefined();

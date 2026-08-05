@@ -10,7 +10,12 @@ import {
 } from '../mocks/mock-services';
 import { mockFilledOrder, mockPendingOrder, mockUTXO } from '../mocks/mock-data';
 
-describe('FulfillmentProcessor Integration', () => {
+// These tests exercise the real StateManager/OrderHistory, which require live
+// Redis/KV credentials - skip cleanly when they aren't configured locally
+const hasKV = !!(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN);
+const describeWithKV = hasKV ? describe : describe.skip;
+
+describeWithKV('FulfillmentProcessor Integration', () => {
   let processor: FulfillmentProcessor;
   let mockCounterparty: MockCounterpartyService;
   let mockBitcoin: MockBitcoinService;
