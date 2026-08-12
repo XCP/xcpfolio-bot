@@ -2,7 +2,7 @@ import { CounterpartyService } from './counterparty';
 import { BitcoinService } from './bitcoin';
 import { NotificationService } from './notifications';
 import { MaintenanceStateManager } from './maintenance-state';
-import { TX_LIMITS, ASSET_CONFIG, MAINTENANCE_RETRY_STRATEGY } from '../constants';
+import { TX_LIMITS, ASSET_CONFIG, MAINTENANCE_RETRY_STRATEGY, STATUS } from '../constants';
 
 export interface OrderMaintenanceConfig {
   xcpfolioAddress: string;
@@ -13,6 +13,7 @@ export interface OrderMaintenanceConfig {
   orderExpiration?: number; // blocks; 0 = indefinite (never expires, Counterparty v11.1.0+)
   waitAfterBroadcast?: number; // ms to wait between broadcasts
   pricesPath?: string; // Path to prices JSON
+  relistCancelled?: boolean; // re-list assets whose latest order was manually cancelled (default false)
 }
 
 export interface MaintenanceResult {
@@ -45,6 +46,14 @@ interface ToProcess {
  * - For each asset with balance, create a new DEX order
  * - Uses lowest fee rate from mempool.space
  * - Bails early if insufficient BTC or mempool at capacity
+ *
+ * Before listing, each asset must pass two gates:
+ * - Deliverability: we still own the underlying asset (and no ownership
+ *   transfer out is pending in the mempool) - otherwise a fill could never
+ *   be fulfilled
+ * - Intent: our latest order for the asset wasn't manually cancelled -
+ *   a cancel means it was delisted on purpose (orders are indefinite, so
+ *   they never expire on their own). Override with relistCancelled=true.
  *
  * Robustness features:
  * - Redis state persistence for recovery on restart
@@ -206,6 +215,25 @@ export class OrderMaintenanceService {
         this.counterparty.getMempoolOrderAssets(this.config.xcpfolioAddress)
       ]);
 
+      // 6b. Assets with an ownership transfer OUT pending in the mempool.
+      // The confirmed owner is still us, so the getAssetInfo check below
+      // wouldn't catch these - a listing would become unfulfillable as soon
+      // as the transfer confirms.
+      const transferringOut = new Set<string>();
+      try {
+        const mempoolTransfers = await this.counterparty.getMempoolTransfers(this.config.xcpfolioAddress);
+        for (const t of mempoolTransfers) {
+          if (t.params?.asset && t.params?.issuer && t.params.issuer !== this.config.xcpfolioAddress) {
+            transferringOut.add(t.params.asset);
+          }
+        }
+      } catch (err) {
+        console.warn(`[${this.timestamp()}] Could not check mempool transfers:`, err);
+      }
+      if (transferringOut.size > 0) {
+        console.log(`Pending outbound transfers: ${[...transferringOut].join(', ')}`);
+      }
+
       // Also check our tracked active orders (for orders we just broadcast)
       const activeOrders = await this.stateManager.getActiveOrders();
       const activeAssets = new Set(Object.keys(activeOrders));
@@ -303,6 +331,44 @@ export class OrderMaintenanceService {
         if (hasActiveOrder) {
           console.log('  ⏭ Already has active order in state - skipping');
           return null;
+        }
+
+        // DELIVERABILITY GATE: only list what we can actually deliver.
+        // Holding the XCPFOLIO.* token doesn't mean we still own the
+        // underlying asset - it may have been transferred out manually
+        // after a cancel. Fail closed: if we can't verify, don't list.
+        if (transferringOut.has(asset)) {
+          console.log('  ⏭ Ownership transfer pending in mempool - skipping');
+          return null;
+        }
+        try {
+          const assetInfo = await this.counterparty.getAssetInfo(asset);
+          if (assetInfo.owner !== this.config.xcpfolioAddress) {
+            console.log(`  ⏭ We no longer own ${asset} (owner: ${assetInfo.owner}) - skipping`);
+            return null;
+          }
+        } catch (err: any) {
+          console.log(`  ⏭ Could not verify ownership of ${asset} - skipping: ${err.message || err}`);
+          return null;
+        }
+
+        // INTENT GATE: orders are indefinite (expiration=0), so a balance
+        // for a previously-listed asset can only mean the order was
+        // manually cancelled - i.e. delisted on purpose. Don't undo that.
+        if (!this.config.relistCancelled) {
+          try {
+            const latestOrder = await this.counterparty.getLatestSellOrder(
+              `${ASSET_CONFIG.XCPFOLIO_PREFIX}${asset}`,
+              this.config.xcpfolioAddress
+            );
+            if (latestOrder?.status === STATUS.CANCELLED) {
+              console.log(`  ⏭ Latest order was cancelled (${latestOrder.tx_hash}) - deliberately delisted, skipping`);
+              return null;
+            }
+          } catch (err: any) {
+            console.log(`  ⏭ Could not check order history for ${asset} - skipping: ${err.message || err}`);
+            return null;
+          }
         }
 
         // CRITICAL: Mark as "in progress" BEFORE composing to prevent race conditions

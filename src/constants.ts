@@ -157,6 +157,7 @@ export const STATUS = {
   IDLE: 'idle',
   FILLED: 'filled',
   CONFIRMED: 'confirmed',
+  CANCELLED: 'cancelled',
 } as const;
 
 // File paths

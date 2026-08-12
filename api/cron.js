@@ -50,7 +50,8 @@ module.exports = async (req, res) => {
           dryRun: process.env.DRY_RUN === 'true',
           maxMempoolTxs: parseInt(process.env.MAX_MEMPOOL_TXS || '25'),
           orderExpiration: parseInt(process.env.ORDER_EXPIRATION || '0'), // 0 = indefinite
-          waitAfterBroadcast: parseInt(process.env.WAIT_AFTER_BROADCAST || '2000')
+          waitAfterBroadcast: parseInt(process.env.WAIT_AFTER_BROADCAST || '2000'),
+          relistCancelled: process.env.RELIST_CANCELLED === 'true' // default: respect manual cancels
         };
 
         const maintenance = new OrderMaintenanceService(maintenanceConfig);

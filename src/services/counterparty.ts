@@ -604,6 +604,36 @@ export class CounterpartyService {
   }
 
   /**
+   * Get our most recently opened sell order for a specific asset (any status).
+   * Used to detect deliberate delisting: if our latest order for the asset was
+   * cancelled, it should not be re-listed automatically.
+   *
+   * Note: block_index on an order is when it was OPENED, so sorting by it
+   * finds the most recently opened order, which is what we want here.
+   */
+  async getLatestSellOrder(giveAsset: string, source: string): Promise<Order | null> {
+    const params = new URLSearchParams({
+      status: 'all',
+      verbose: 'true',
+      limit: '1000'
+    });
+
+    const orders = await this.request<Order[]>(`/assets/${giveAsset}/orders?${params}`);
+
+    const ours = (orders || []).filter(o =>
+      o.source === source &&
+      (o.give_asset === giveAsset || o.give_asset_info?.asset_longname === giveAsset)
+    );
+
+    if (ours.length === 0) {
+      return null;
+    }
+
+    ours.sort((a, b) => (b.block_index - a.block_index) || (b.tx_index - a.tx_index));
+    return ours[0];
+  }
+
+  /**
    * Get unconfirmed ORDER events from mempool for our address
    * This catches orders that are broadcast but not yet in the orders table
    */

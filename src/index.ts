@@ -54,6 +54,7 @@ const orderMaintenance = new OrderMaintenanceService({
   maxMempoolTxs: process.env.MAX_MEMPOOL_TXS ? parseInt(process.env.MAX_MEMPOOL_TXS) : 25,
   orderExpiration: process.env.ORDER_EXPIRATION ? parseInt(process.env.ORDER_EXPIRATION) : 0, // 0 = indefinite
   waitAfterBroadcast: process.env.WAIT_AFTER_BROADCAST ? parseInt(process.env.WAIT_AFTER_BROADCAST) : 2000,
+  relistCancelled: process.env.RELIST_CANCELLED === 'true', // default: respect manual cancels
 });
 
 // Load prices for order maintenance
