@@ -612,17 +612,22 @@ export class CounterpartyService {
    * finds the most recently opened order, which is what we want here.
    */
   async getLatestSellOrder(giveAsset: string, source: string): Promise<Order | null> {
+    // /assets/{asset}/orders returns an EMPTY list (not an error) for subasset
+    // longnames - orders are only indexed under the numeric asset name, so
+    // resolve the longname first (confirmed against Counterparty v11.2.0).
+    const info = await this.getAssetInfo(giveAsset);
+
     const params = new URLSearchParams({
       status: 'all',
       verbose: 'true',
       limit: '1000'
     });
 
-    const orders = await this.request<Order[]>(`/assets/${giveAsset}/orders?${params}`);
+    const orders = await this.request<Order[]>(`/assets/${info.asset}/orders?${params}`);
 
     const ours = (orders || []).filter(o =>
       o.source === source &&
-      (o.give_asset === giveAsset || o.give_asset_info?.asset_longname === giveAsset)
+      (o.give_asset === info.asset || o.give_asset_info?.asset_longname === giveAsset)
     );
 
     if (ours.length === 0) {
