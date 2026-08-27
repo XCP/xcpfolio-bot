@@ -35,4 +35,25 @@ describe('CounterpartyService', () => {
       );
     });
   });
+
+  describe('composeTransfer', () => {
+    it('uses Counterparty v2 sat_per_vbyte fee parameter', async () => {
+      (axios as unknown as jest.Mock).mockResolvedValueOnce({
+        data: { result: { rawtransaction: 'raw-tx' } }
+      });
+
+      const service = new CounterpartyService('https://counterparty.test/v2');
+      const rawTransaction = await service.composeTransfer(
+        '1SellerAddress',
+        'GENX',
+        '1BuyerAddress',
+        1
+      );
+
+      expect(rawTransaction).toBe('raw-tx');
+      const url = (axios as unknown as jest.Mock).mock.calls[0][0].url;
+      expect(url).toContain('sat_per_vbyte=1');
+      expect(url).not.toContain('fee_rate=');
+    });
+  });
 });

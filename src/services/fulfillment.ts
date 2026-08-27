@@ -339,11 +339,17 @@ export class FulfillmentProcessor {
       // Notify about new confirmed orders
       for (const order of unprocessedOrders) {
         const assetName = (order.give_asset_info?.asset_longname || order.give_asset).replace('XCPFOLIO.', '');
-        await NotificationService.success('✅ Order filled & confirmed!', {
-          asset: assetName,
-          orderHash: order.tx_hash.slice(0, 8) + '...',
-          block: order.block_index
-        });
+        await NotificationService.sendOnce(
+          `order-filled:${order.tx_hash}`,
+          24 * 3600,
+          '✅ Order filled & confirmed!',
+          'success',
+          {
+            asset: assetName,
+            orderHash: order.tx_hash.slice(0, 8) + '...',
+            block: order.block_index
+          }
+        );
       }
 
       // 6. Process new orders sequentially

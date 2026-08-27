@@ -15,7 +15,7 @@ export interface ComposeIssuanceParams {
   lock?: boolean;
   reset?: boolean;
   encoding?: 'auto' | 'opreturn' | 'multisig' | 'pubkeyhash';
-  fee_rate?: number;
+  sat_per_vbyte?: number;
   inputs_set?: string;
   dust_return_pubkey?: string;
   validate?: boolean;
@@ -297,7 +297,7 @@ export class CounterpartyService {
       quantity: '0', // 0 for ownership transfer
       transfer_destination: destination,
       description: '', // Empty description for transfer
-      fee_rate: feeRate.toString(),
+      sat_per_vbyte: feeRate.toString(),
       encoding,
       validate: validate.toString(),
       allow_unconfirmed_inputs: 'true'
