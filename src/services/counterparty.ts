@@ -570,7 +570,9 @@ export class CounterpartyService {
    */
   async getOpenOrderAssets(address: string): Promise<Set<string>> {
     const assets = new Set<string>();
-    const limit = 1000;
+    // Keep each verbose response small enough to avoid intermittent upstream
+    // stream aborts while still walking every open order via pagination.
+    const limit = 250;
     let offset = 0;
     let hasMore = true;
 
