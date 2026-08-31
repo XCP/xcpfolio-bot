@@ -34,6 +34,31 @@ describe('CounterpartyService', () => {
         'limit=250&offset=250'
       );
     });
+
+    it('retries an aborted response stream that started with HTTP 200', async () => {
+      const timeoutSpy = jest.spyOn(global, 'setTimeout').mockImplementation(((callback: () => void) => {
+        callback();
+        return 0 as any;
+      }) as typeof setTimeout);
+      (axios.isAxiosError as unknown as jest.Mock).mockReturnValue(true);
+
+      const abortedStreamError = Object.assign(new Error('stream has been aborted'), {
+        code: 'ERR_BAD_RESPONSE',
+        response: { status: 200, statusText: 'OK', data: undefined },
+        config: { url: 'https://counterparty.test/v2/addresses/1TestAddress/orders' }
+      });
+
+      (axios as unknown as jest.Mock)
+        .mockRejectedValueOnce(abortedStreamError)
+        .mockResolvedValueOnce({ data: { result: [] } });
+
+      const service = new CounterpartyService('https://counterparty.test/v2');
+      const assets = await service.getOpenOrderAssets('1TestAddress');
+
+      expect(assets.size).toBe(0);
+      expect(axios).toHaveBeenCalledTimes(2);
+      timeoutSpy.mockRestore();
+    });
   });
 
   describe('composeTransfer', () => {

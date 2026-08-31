@@ -534,9 +534,9 @@ export class OrderMaintenanceService {
 
     } catch (error) {
       console.error(`[${this.timestamp()}] Fatal error:`, error);
-      await NotificationService.error('Order maintenance failed', {
-        error: error instanceof Error ? error.message : String(error)
-      });
+      // Let the caller send the boundary-level alert. Both the Vercel cron and
+      // the long-running service already notify on a rejected maintenance run;
+      // notifying here as well produces two Discord errors for one incident.
       throw error;
     } finally {
       this.isRunning = false;

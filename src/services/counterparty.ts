@@ -75,6 +75,7 @@ export class CounterpartyService {
     const config: any = {
       method,
       url,
+      timeout: 30000,
       headers: {
         'Content-Type': 'application/json',
       }
@@ -107,14 +108,23 @@ export class CounterpartyService {
       } catch (error) {
         if (axios.isAxiosError(error)) {
           const status = error.response?.status;
+          const isRetryableStatus = status !== undefined &&
+            (API_RETRY.RETRYABLE_STATUS_CODES as readonly number[]).includes(status);
+          // Axios reports prematurely closed response bodies as ERR_BAD_RESPONSE.
+          // In that case the upstream headers may still contain HTTP 200 even
+          // though no complete response body was delivered.
+          const isRetryableTransportError = status === undefined || status === 200;
 
-          // Retry on transient HTTP errors
-          if (status && (API_RETRY.RETRYABLE_STATUS_CODES as readonly number[]).includes(status) && attempt < API_RETRY.MAX_RETRIES) {
+          // Retry transient HTTP failures as well as aborted/failed transports.
+          if ((isRetryableStatus || isRetryableTransportError) && attempt < API_RETRY.MAX_RETRIES) {
             const delay = Math.min(
               API_RETRY.BASE_DELAY * Math.pow(2, attempt),
               API_RETRY.MAX_DELAY
             );
-            console.warn(`[Counterparty API] ${status} ${error.response?.statusText} - retrying in ${(delay / 1000).toFixed(1)}s...`);
+            const failure = status !== undefined
+              ? `${status} ${error.response?.statusText || ''}`.trim()
+              : error.code || 'network error';
+            console.warn(`[Counterparty API] ${failure} (${error.message}) - retrying in ${(delay / 1000).toFixed(1)}s...`);
             await new Promise(resolve => setTimeout(resolve, delay));
             lastError = new Error(`Counterparty API error: ${error.response?.data?.error?.message || error.message}`);
             continue;
