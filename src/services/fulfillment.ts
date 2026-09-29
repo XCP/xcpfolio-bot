@@ -256,9 +256,28 @@ export class FulfillmentProcessor {
               ? match.tx1_address 
               : match.tx0_address;
             
-            // If buyer already owns the asset, mark as processed and skip
-            if (assetInfo.owner === buyer) {
-              console.log(`Asset ${assetName} already owned by buyer ${buyer}, marking as processed`);
+            // The buyer may have transferred the asset onward after delivery.
+            // Recover completion from confirmed history before checking whether
+            // we still own it, otherwise old fulfilled orders retry forever.
+            let transfer;
+            if (assetInfo.owner !== this.config.xcpfolioAddress) {
+              try {
+                const issuances = await this.counterparty.getAssetIssuances(assetName);
+                const filledBlock = Math.max(order.block_index, match.block_index || 0);
+                transfer = issuances.find(i =>
+                  i.transfer === true &&
+                  i.source === this.config.xcpfolioAddress &&
+                  i.issuer === buyer &&
+                  i.block_index >= filledBlock &&
+                  (i.status === undefined || i.status === 'valid')
+                );
+              } catch (error) {
+                console.error(`Error getting transfer details for ${assetName}:`, error);
+              }
+            }
+
+            if (assetInfo.owner === buyer || transfer) {
+              console.log(`Asset ${assetName} already delivered to buyer ${buyer}, marking as processed`);
               await this.state.markOrderProcessed(order.tx_hash);
               
               // Update order history to show it's confirmed (for display only)
@@ -275,24 +294,12 @@ export class FulfillmentProcessor {
               let deliveryBlock = order.block_index;
               let transferTxid: string | undefined;
               
-              try {
-                // Get issuances to find the actual transfer transaction
-                const issuances = await this.counterparty.getAssetIssuances(assetName);
-                const transfer = issuances.find(i => 
-                  i.transfer === true &&
-                  i.source === this.config.xcpfolioAddress &&
-                  i.issuer === buyer
-                );
-                
-                if (transfer) {
-                  transferTxid = transfer.tx_hash;
-                  deliveryBlock = transfer.block_index;
-                  if (transfer.block_time) {
-                    deliveryTime = transfer.block_time * 1000; // Convert to milliseconds
-                  }
+              if (transfer) {
+                transferTxid = transfer.tx_hash;
+                deliveryBlock = transfer.block_index;
+                if (transfer.block_time) {
+                  deliveryTime = transfer.block_time * 1000; // Convert to milliseconds
                 }
-              } catch (error) {
-                console.error(`Error getting transfer details for ${assetName}:`, error);
               }
               
               // Get buyer's order hash from the match
@@ -390,14 +397,7 @@ export class FulfillmentProcessor {
           console.log(`\n${'='.repeat(60)}`);
           console.log(`Processing order ${order.tx_hash}`);
           
-          const assetName = (order.give_asset_info?.asset_longname || order.give_asset).replace('XCPFOLIO.', '');
-          
-          // Notify we're starting to process
-          await NotificationService.info('⚙️ Processing order', {
-            asset: assetName,
-            orderHash: order.tx_hash.slice(0, 8) + '...'
-          });
-          
+          // Routine retries belong in logs; notify only on meaningful events.
           const result = await this.processOrderSafely(order, currentBlock);
           results.push(result);
 

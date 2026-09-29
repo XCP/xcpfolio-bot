@@ -33,6 +33,7 @@ export interface Order {
 }
 
 export interface Issuance {
+  status?: string;
   tx_index: number;
   tx_hash: string;
   block_index: number;
