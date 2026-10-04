@@ -299,4 +299,12 @@ The bot uses a single-worker architecture to prevent race conditions and double-
 
 ## License
 
-MIT
+MIT## Reorganization recovery
+
+The fulfillment pass waits until Counterparty's fresh parsed tip is at Bitcoin's tip height and has the same canonical hash. Core reads use a unique URL on every request and retry, preserving the first verbose value and pagination parameters.
+
+Delivery watches are persisted in fulfillment-state before an order is marked processed. Recent existing order-history records are enrolled on the next pass. Watches survive process restarts and retain the transaction's confirming block identity until 12 confirmations. A transaction back in mempool remains processed; only explicit absence or an orphaned confirming hash reopens it for the ordinary current-order/ownership checks. Provider errors stop the pass without clearing processed markers. Confirmations deeper than 12 blocks are outside automatic recovery; inspect and reconcile affected orders after a deeper reorg.
+
+Reopening a delivery also saves its order hash in a retry queue in the same Redis write that clears the processed marker. Queued orders are checked before the normal scan's ten-completed-orders shortcut, including after a restart. They still require a current filled order and the ordinary ownership, duplicate-delivery, and capacity checks. Missing orders and failed attempts remain queued; a tracked replacement delivery takes over recovery before its retry entry is removed. Processed-order pruning does not remove retries.
+
+A missing transaction is distinct from a failed lookup: HTTP 404 is absence, whereas rate limits, 5xx responses, and malformed responses are unknown. RBF and recovered mempool deliveries also register durable watches. Redis records are backward compatible; no manual migration is needed. Delivery watches and retries are subject to the existing fulfillment-state retention policy (30-day TTL, refreshed on state writes).

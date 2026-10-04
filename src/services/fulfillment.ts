@@ -3,6 +3,7 @@ import { BitcoinService, SignedTransaction } from './bitcoin';
 import { StateManager } from './state';
 import { OrderHistoryService, OrderStatus } from './order-history';
 import { NotificationService } from './notifications';
+import { deliveryState } from './chain-read';
 import { Order } from '../types';
 import { RETRY_STRATEGY, TX_LIMITS, TIME, ASSET_CONFIG } from '../constants';
 
@@ -200,6 +201,16 @@ export class FulfillmentProcessor {
         return results;
       }
 
+      // A fresh Core tip must be on Bitcoin's chain before recovery or new work.
+      const currentBlock = await this.bitcoin.getCurrentBlockHeight();
+      const coreTip = await this.counterparty.getCurrentBlock();
+      if (!coreTip?.block_hash || coreTip.block_index !== currentBlock ||
+          await this.bitcoin.getCanonicalBlockHash(coreTip.block_index) !== coreTip.block_hash) {
+        console.log('Waiting for Counterparty to index the canonical Bitcoin chain');
+        return results;
+      }
+      await this.recheckDeliveries(currentBlock);
+
       // 2. Get all pending transfers from Counterparty mempool
       const pendingTransfers = await this.getPendingTransfers();
       console.log(`Found ${pendingTransfers.size} pending transfers in mempool`);
@@ -208,7 +219,6 @@ export class FulfillmentProcessor {
       await this.cleanupOldCompletedOrders();
 
       // 4. Get current block height
-      const currentBlock = await this.bitcoin.getCurrentBlockHeight();
       
       // 4a. Track unconfirmed open orders (new listings)
       await this.trackMempoolOpenOrders();
@@ -219,15 +229,25 @@ export class FulfillmentProcessor {
       
       // Get processed orders set for checking
       const processedOrders = await this.state.getProcessedOrders();
+
+      // Recovery is independent of the normal scan's ten-completed shortcut.
+      // Use fresh filled orders, never a saved payload: a reorg can also undo
+      // the purchase. Missing orders stay queued for a later canonical read.
+      const deliveryRetries = new Set(await this.state.getDeliveryRetries());
+      const scanOrders = [
+        ...orders.filter(order => deliveryRetries.has(order.tx_hash)),
+        ...orders.filter(order => !deliveryRetries.has(order.tx_hash)),
+      ];
       
       // Filter to unprocessed orders and check for already transferred assets
       const unprocessedOrders: Order[] = [];
       let consecutiveProcessed = 0;
       const stopAfterConsecutive = 10; // Stop after finding 10 consecutive already-processed orders
       
-      for (const order of orders) {
+      for (const order of scanOrders) {
         // Check if we've already processed this exact order
         if (processedOrders.has(order.tx_hash)) {
+          if (deliveryRetries.has(order.tx_hash)) continue;
           consecutiveProcessed++;
           console.log(`Order ${order.tx_hash} already in processed list (${consecutiveProcessed} consecutive)`);
           
@@ -276,8 +296,9 @@ export class FulfillmentProcessor {
               }
             }
 
-            if (assetInfo.owner === buyer || transfer) {
+            if (transfer) {
               console.log(`Asset ${assetName} already delivered to buyer ${buyer}, marking as processed`);
+              await this.state.watchDelivery(order.tx_hash, { txid: transfer.tx_hash, blockHeight: transfer.block_index });
               await this.state.markOrderProcessed(order.tx_hash);
               
               // Update order history to show it's confirmed (for display only)
@@ -599,6 +620,13 @@ export class FulfillmentProcessor {
       );
 
       if (alreadyTransferred) {
+        const proof = (await this.counterparty.getAssetIssuances(assetName)).find(issuance =>
+          issuance.transfer === true && issuance.source === this.config.xcpfolioAddress &&
+          issuance.issuer === buyerAddress && issuance.block_index >= order.block_index &&
+          (issuance.status === undefined || issuance.status === 'valid'));
+        if (!proof) return { orderHash: order.tx_hash, asset: assetName, buyer: buyerAddress,
+          success: true, stage: 'broadcast' }; // pending transfer, not a durable confirmation
+        await this.state.watchDelivery(order.tx_hash, { txid: proof.tx_hash, blockHeight: proof.block_index });
         // Mark as processed and clean up
         await this.state.markOrderProcessed(order.tx_hash);
         this.processingState.orderTransactions.delete(order.tx_hash);
@@ -852,6 +880,8 @@ export class FulfillmentProcessor {
           rbfCount: 0
         });
 
+        // The durable watch must precede the duplicate-suppression marker.
+        await this.state.watchDelivery(order.tx_hash, { txid });
         // Mark as processed
         await this.state.markOrderProcessed(order.tx_hash);
 
@@ -869,6 +899,8 @@ export class FulfillmentProcessor {
         const errorMsg = (error instanceof Error ? error.message : String(error)).toLowerCase();
         if (errorMsg.includes('already') && errorMsg.includes('mempool')) {
           console.log('Transaction already in mempool');
+          await this.state.watchDelivery(order.tx_hash, { txid: signedTx.txid });
+          await this.orderHistory.updateOrderStatus(order.tx_hash, 'confirming', 'mempool', signedTx.txid);
           await this.state.markOrderProcessed(order.tx_hash);
           return {
             orderHash: order.tx_hash,
@@ -1067,6 +1099,7 @@ export class FulfillmentProcessor {
       // Update tracking with RBF history
       const oldTxid = tx.txid;
       tx.txid = txid;
+      await this.state.watchDelivery(tx.orderHash, { txid });
       tx.rbfHistory.push(txid);
       tx.feeRate = newFeeRate;
       tx.isRbf = true;
@@ -1232,6 +1265,45 @@ export class FulfillmentProcessor {
     // Remove confirmed transactions
     for (const orderHash of toRemove) {
       this.processingState.orderTransactions.delete(orderHash);
+    }
+  }
+
+  /** Persisted watches survive cron restarts. A provider failure is unknown;
+   * only explicit absence or an orphaned confirmation reopens an order. */
+  private async recheckDeliveries(tip: number): Promise<void> {
+    const watches = await this.state.getDeliveryWatches();
+    // Upgrade existing recent delivery records without rescanning old orders.
+    for (const order of await this.orderHistory.getOrders()) {
+      if (!order.txid || watches[order.orderHash] ||
+          !['confirmed', 'confirming', 'broadcasting'].includes(order.status) ||
+          (order.confirmedBlock !== undefined && order.confirmedBlock <= tip - 12)) continue;
+      watches[order.orderHash] = { txid: order.txid };
+      await this.state.watchDelivery(order.orderHash, watches[order.orderHash]);
+    }
+    for (const [orderHash, watch] of Object.entries(watches)) {
+      const status = await this.bitcoin.getConfirmationStatus(watch.txid);
+      const hash = status?.confirmed && Number.isSafeInteger(status.block_height)
+        ? await this.bitcoin.getCanonicalBlockHash(status.block_height!) : null;
+      const result = deliveryState(status, hash, tip);
+      if (result === 'unknown') continue;
+      if (result === 'missing' || result === 'orphaned') {
+        await this.orderHistory.recordDeliveryConfirmation(orderHash);
+        await this.state.finishDeliveryWatch(orderHash, true);
+        this.processingState.orderTransactions.delete(orderHash);
+      } else if (result === 'pending') {
+        if (watch.blockHash || watch.blockHeight !== undefined) {
+          await this.orderHistory.recordDeliveryConfirmation(orderHash);
+          await this.orderHistory.updateOrderStatus(orderHash, 'confirming', 'mempool', watch.txid);
+        }
+        // Keep the processed marker while the exact delivery is in mempool.
+        await this.state.watchDelivery(orderHash, { txid: watch.txid });
+      } else {
+        await this.orderHistory.recordDeliveryConfirmation(orderHash, {
+          height: status!.block_height!, hash: hash!, confirmations: tip - status!.block_height! + 1,
+        });
+        if (result === 'final') await this.state.finishDeliveryWatch(orderHash);
+        else await this.state.watchDelivery(orderHash, { txid: watch.txid, blockHeight: status!.block_height, blockHash: hash! });
+      }
     }
   }
 
@@ -1443,7 +1515,8 @@ export class FulfillmentProcessor {
             });
             
             // Also mark as processed in state
-            this.state.markOrderProcessed(matchingOrder.tx_hash);
+            await this.state.watchDelivery(matchingOrder.tx_hash, { txid: tx_hash });
+            await this.state.markOrderProcessed(matchingOrder.tx_hash);
           }
         }
       }
