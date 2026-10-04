@@ -9,6 +9,8 @@ export interface FulfillmentState {
   failedOrders: string[];  // Orders that permanently failed after all retries
   lastCleanup: number;  // Last block we cleaned up old orders
   deliveryWatches?: Record<string, DeliveryWatch>;
+  // Reopened deliveries must survive restarts and processed-order pruning.
+  deliveryRetries?: string[];
 }
 
 export class StateManager {
@@ -112,12 +114,21 @@ export class StateManager {
 
   async markOrderProcessed(orderHash: string): Promise<void> {
     const state = await this.loadState();
+    let changed = false;
     if (!state.processedOrders.includes(orderHash)) {
       state.processedOrders.push(orderHash);
       // Keep only last 1000 orders to prevent unbounded growth
       if (state.processedOrders.length > 1000) {
         state.processedOrders = state.processedOrders.slice(-1000);
       }
+      changed = true;
+    }
+    // A tracked replacement takes over recovery before the retry is removed.
+    if (state.deliveryWatches?.[orderHash] && state.deliveryRetries?.includes(orderHash)) {
+      state.deliveryRetries = state.deliveryRetries.filter(hash => hash !== orderHash);
+      changed = true;
+    }
+    if (changed) {
       this.state = state;
       await this.saveState();
     }
@@ -139,10 +150,19 @@ export class StateManager {
     return { ...(await this.loadState()).deliveryWatches };
   }
 
+  async getDeliveryRetries(): Promise<string[]> {
+    return [...((await this.loadState()).deliveryRetries ?? [])];
+  }
+
   async finishDeliveryWatch(orderHash: string, reopen = false): Promise<void> {
     const state = await this.loadState();
     if (state.deliveryWatches) delete state.deliveryWatches[orderHash];
-    if (reopen) state.processedOrders = state.processedOrders.filter(hash => hash !== orderHash);
+    if (reopen) {
+      // One Redis write both reopens the order and preserves its retry intent.
+      state.processedOrders = state.processedOrders.filter(hash => hash !== orderHash);
+      const retries = (state.deliveryRetries ??= []);
+      if (!retries.includes(orderHash)) retries.push(orderHash);
+    }
     this.state = state;
     await this.saveState();
   }

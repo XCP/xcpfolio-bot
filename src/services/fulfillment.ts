@@ -229,15 +229,25 @@ export class FulfillmentProcessor {
       
       // Get processed orders set for checking
       const processedOrders = await this.state.getProcessedOrders();
+
+      // Recovery is independent of the normal scan's ten-completed shortcut.
+      // Use fresh filled orders, never a saved payload: a reorg can also undo
+      // the purchase. Missing orders stay queued for a later canonical read.
+      const deliveryRetries = new Set(await this.state.getDeliveryRetries());
+      const scanOrders = [
+        ...orders.filter(order => deliveryRetries.has(order.tx_hash)),
+        ...orders.filter(order => !deliveryRetries.has(order.tx_hash)),
+      ];
       
       // Filter to unprocessed orders and check for already transferred assets
       const unprocessedOrders: Order[] = [];
       let consecutiveProcessed = 0;
       const stopAfterConsecutive = 10; // Stop after finding 10 consecutive already-processed orders
       
-      for (const order of orders) {
+      for (const order of scanOrders) {
         // Check if we've already processed this exact order
         if (processedOrders.has(order.tx_hash)) {
+          if (deliveryRetries.has(order.tx_hash)) continue;
           consecutiveProcessed++;
           console.log(`Order ${order.tx_hash} already in processed list (${consecutiveProcessed} consecutive)`);
           
