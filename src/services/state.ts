@@ -51,10 +51,13 @@ export class StateManager {
         return state;
       }
     } catch (error) {
+      this.state = null;
+      this.lastCacheTime = 0;
       console.error('Error loading state from Redis:', error);
+      throw error;
     }
 
-    // Default state
+    // Initialize only after Redis successfully confirms the key is absent.
     const defaultState: FulfillmentState = {
       lastBlock: 0,
       lastOrderHash: null,
@@ -77,6 +80,10 @@ export class StateManager {
         ex: 60 * 60 * 24 * 30 // 30 day TTL
       });
     } catch (error) {
+      // The write may or may not have committed. Do not let a mutated local
+      // cache masquerade as durable state on the next attempt.
+      this.state = null;
+      this.lastCacheTime = 0;
       console.error('Error saving state to Redis:', error);
       throw error; // Re-throw to ensure we know about save failures
     }
