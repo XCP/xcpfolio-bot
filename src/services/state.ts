@@ -1,4 +1,5 @@
 import { Redis } from '@upstash/redis';
+import type { DeliveryWatch } from './chain-read';
 
 export interface FulfillmentState {
   lastBlock: number;
@@ -7,6 +8,7 @@ export interface FulfillmentState {
   processedOrders: string[];  // Array for Redis serialization (not Set)
   failedOrders: string[];  // Orders that permanently failed after all retries
   lastCleanup: number;  // Last block we cleaned up old orders
+  deliveryWatches?: Record<string, DeliveryWatch>;
 }
 
 export class StateManager {
@@ -124,6 +126,25 @@ export class StateManager {
   async getProcessedOrders(): Promise<Set<string>> {
     const state = await this.loadState();
     return new Set(state.processedOrders);
+  }
+
+  async watchDelivery(orderHash: string, watch: DeliveryWatch): Promise<void> {
+    const state = await this.loadState();
+    (state.deliveryWatches ??= {})[orderHash] = watch;
+    this.state = state;
+    await this.saveState();
+  }
+
+  async getDeliveryWatches(): Promise<Record<string, DeliveryWatch>> {
+    return { ...(await this.loadState()).deliveryWatches };
+  }
+
+  async finishDeliveryWatch(orderHash: string, reopen = false): Promise<void> {
+    const state = await this.loadState();
+    if (state.deliveryWatches) delete state.deliveryWatches[orderHash];
+    if (reopen) state.processedOrders = state.processedOrders.filter(hash => hash !== orderHash);
+    this.state = state;
+    await this.saveState();
   }
 
   async getLastCleanup(): Promise<number> {

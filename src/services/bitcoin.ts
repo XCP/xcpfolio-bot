@@ -4,6 +4,7 @@ import { sha256 } from '@noble/hashes/sha256';
 import * as secp256k1 from 'secp256k1';
 import { base58check } from '@scure/base';
 import axios from 'axios';
+import type { ConfirmationStatus } from './chain-read';
 import { API_CONFIG, TX_SIZE, TIME, TX_LIMITS } from '../constants';
 
 export interface UTXO {
@@ -467,6 +468,29 @@ export class BitcoinService {
       return response.data;
     } catch (error) {
       throw new Error(`Transaction not found: ${txid}`);
+    }
+  }
+
+  async getCanonicalBlockHash(height: number): Promise<string | null> {
+    try {
+      const response = await axios.get<string>(`${MEMPOOL_API}/block-height/${height}`, { timeout: 15000 });
+      const hash = response.data.trim();
+      if (!/^[a-f0-9]{64}$/.test(hash)) throw new Error('Invalid Bitcoin block hash');
+      return hash;
+    } catch (error) {
+      if (axios.isAxiosError(error) && error.response?.status === 404) return null;
+      throw error;
+    }
+  }
+
+  async getConfirmationStatus(txid: string): Promise<ConfirmationStatus | null> {
+    try {
+      const response = await axios.get<ConfirmationStatus>(`${MEMPOOL_API}/tx/${txid}/status`, { timeout: 15000 });
+      if (typeof response.data?.confirmed !== 'boolean') throw new Error('Invalid transaction status');
+      return response.data;
+    } catch (error) {
+      if (axios.isAxiosError(error) && error.response?.status === 404) return null;
+      throw error;
     }
   }
 

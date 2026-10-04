@@ -23,6 +23,7 @@ export interface OrderStatus {
   deliveredAt?: number; // When transfer tx was confirmed (delivery complete)
   confirmedAt?: number; // When transaction was confirmed
   confirmedBlock?: number; // Block height when transfer was confirmed
+  confirmedBlockHash?: string;
   txid?: string;  // Asset transfer transaction ID
   error?: string;
   retryCount?: number;
@@ -35,6 +36,22 @@ export class OrderHistoryService {
   private maxOrders: number;
   private cacheExpiry = 5000; // 5 second cache
   private lastCacheTime = 0;
+
+  async recordDeliveryConfirmation(orderHash: string, block?: { height: number; hash: string; confirmations: number }): Promise<void> {
+    await this.loadHistory();
+    const order = this.orders.get(orderHash);
+    if (!order) return;
+    if (block) {
+      Object.assign(order, { status: 'confirmed', stage: 'confirmed', confirmedBlock: block.height,
+        confirmedBlockHash: block.hash, confirmations: block.confirmations, confirmedAt: Date.now() });
+    } else {
+      for (const key of ['confirmedBlock', 'confirmedBlockHash', 'confirmedAt', 'deliveredAt'] as const) delete order[key];
+      await this.redis.hdel(`order:${orderHash}`, 'confirmedBlock', 'confirmedBlockHash', 'confirmedAt', 'deliveredAt');
+      Object.assign(order, { status: 'pending', stage: 'validation', confirmations: 0 });
+    }
+    order.lastUpdated = Date.now();
+    await this.saveHistory();
+  }
 
   constructor(historyPath?: string, maxOrders = 100) {
     // historyPath parameter kept for compatibility but ignored

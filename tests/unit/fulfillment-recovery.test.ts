@@ -27,6 +27,7 @@ describe('Fulfillment recovery after a buyer transfers an asset onward', () => {
   };
   let processed: Set<string>;
   let issuances: any[];
+  let watches: Record<string, { txid: string; blockHeight?: number; blockHash?: string }>;
 
   function createProcessor() {
     const processor = new FulfillmentProcessor({ xcpfolioAddress: seller, privateKey: 'unused' });
@@ -37,6 +38,9 @@ describe('Fulfillment recovery after a buyer transfers an asset onward', () => {
 
     bitcoin.getUnconfirmedTxCount.mockResolvedValue(0);
     bitcoin.getCurrentBlockHeight.mockResolvedValue(300);
+    bitcoin.getCanonicalBlockHash.mockResolvedValue('a'.repeat(64));
+    bitcoin.getConfirmationStatus.mockResolvedValue({ confirmed: true, block_height: 202, block_hash: 'a'.repeat(64) });
+    counterparty.getCurrentBlock.mockResolvedValue({ block_index: 300, block_hash: 'a'.repeat(64) });
     counterparty.getMempoolTransfers.mockResolvedValue([]);
     counterparty.getMempoolBuyOrders.mockResolvedValue([]);
     counterparty.getFilledXCPFOLIOOrders.mockResolvedValue([order]);
@@ -49,6 +53,13 @@ describe('Fulfillment recovery after a buyer transfers an asset onward', () => {
     state.getProcessedOrders.mockImplementation(async () => new Set(processed));
     state.isOrderProcessed.mockImplementation(async (hash: string) => processed.has(hash));
     state.markOrderProcessed.mockImplementation(async (hash: string) => { processed.add(hash); });
+    state.getDeliveryWatches.mockImplementation(async () => ({ ...watches }));
+    state.watchDelivery.mockImplementation(async (hash: string, watch: any) => { watches[hash] = watch; });
+    state.finishDeliveryWatch.mockImplementation(async (hash: string, reopen: boolean) => {
+      delete watches[hash];
+      if (reopen) processed.delete(hash);
+    });
+    history.getOrders.mockResolvedValue([]);
     history.getOrder.mockResolvedValue({ purchasedAt: 1700000000000 });
 
     // Keep all transaction execution and delays outside these loop-level tests.
@@ -57,12 +68,13 @@ describe('Fulfillment recovery after a buyer transfers an asset onward', () => {
       success: false, stage: 'validation', error: 'Not owned',
     });
     jest.spyOn(processor as any, 'sleep').mockResolvedValue(undefined);
-    return { processor, state, history, attempt, counterparty };
+    return { processor, state, history, attempt, counterparty, bitcoin };
   }
 
   beforeEach(() => {
     jest.clearAllMocks();
     processed = new Set();
+    watches = {};
     issuances = [
       { ...delivered, tx_hash: 'onward-transfer', source: buyer, issuer: 'later-owner', block_index: 210 },
       delivered,
@@ -70,6 +82,50 @@ describe('Fulfillment recovery after a buyer transfers an asset onward', () => {
   });
 
   afterEach(() => jest.restoreAllMocks());
+
+  it.each(['missing', 'orphaned'])("reopens a persisted %s delivery after a restart", async reason => {
+    processed.add(order.tx_hash);
+    watches[order.tx_hash] = { txid: 'delivery', blockHeight: 299, blockHash: 'b'.repeat(64) };
+    const run = createProcessor();
+    run.counterparty.getAssetInfo.mockResolvedValue({ owner: seller });
+    run.bitcoin.getConfirmationStatus.mockResolvedValue(reason === 'missing' ? null : {
+      confirmed: true, block_height: 299, block_hash: 'b'.repeat(64),
+    });
+    await run.processor.process();
+    expect(run.history.recordDeliveryConfirmation).toHaveBeenCalledWith(order.tx_hash);
+    expect(run.state.finishDeliveryWatch).toHaveBeenCalledWith(order.tx_hash, true);
+    expect(run.attempt).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a delivery processed while it is back in the mempool', async () => {
+    processed.add(order.tx_hash);
+    watches[order.tx_hash] = { txid: 'delivery', blockHeight: 299, blockHash: 'b'.repeat(64) };
+    const run = createProcessor();
+    run.bitcoin.getConfirmationStatus.mockResolvedValue({ confirmed: false });
+    await run.processor.process();
+    expect(processed.has(order.tx_hash)).toBe(true);
+    expect(run.attempt).not.toHaveBeenCalled();
+    expect(watches[order.tx_hash]).toEqual({ txid: 'delivery' });
+  });
+
+  it('does not reopen deliveries or execute orders during an upstream outage', async () => {
+    processed.add(order.tx_hash);
+    watches[order.tx_hash] = { txid: 'delivery' };
+    const run = createProcessor();
+    run.bitcoin.getConfirmationStatus.mockRejectedValue(new Error('503 unavailable'));
+    await expect(run.processor.process()).rejects.toThrow('503 unavailable');
+    expect(processed.has(order.tx_hash)).toBe(true);
+    expect(run.state.finishDeliveryWatch).not.toHaveBeenCalled();
+    expect(run.attempt).not.toHaveBeenCalled();
+  });
+
+  it('waits while Counterparty is on an orphaned branch', async () => {
+    const run = createProcessor();
+    run.counterparty.getCurrentBlock.mockResolvedValue({ block_index: 300, block_hash: 'b'.repeat(64) });
+    await run.processor.process();
+    expect(run.state.getDeliveryWatches).not.toHaveBeenCalled();
+    expect(run.attempt).not.toHaveBeenCalled();
+  });
 
   it('recovers the original delivery and stays complete across fresh cron processors', async () => {
     const first = createProcessor();

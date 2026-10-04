@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { freshCounterpartyUrl } from './chain-read';
 import { Order, Issuance, Block } from '../types';
 import { UTXO } from './bitcoin';
 import { API_CONFIG, API_RETRY, ASSET_CONFIG, STATUS } from '../constants';
@@ -89,6 +90,7 @@ export class CounterpartyService {
 
     for (let attempt = 0; attempt <= API_RETRY.MAX_RETRIES; attempt++) {
       try {
+        if (method === 'GET') config.url = freshCounterpartyUrl(url);
         if (attempt === 0) {
           console.log(`[Counterparty API] ${method} ${url}`);
           if (data) {
